@@ -2,4 +2,6 @@ pandas
 scikit-learn
 scipy
 feature_engine
-scoreacardpy
+scorecardpy
+pyarrow
+polars
