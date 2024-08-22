@@ -1,11 +1,9 @@
 import polars as pl
 from datetime import datetime
 import pandas as pd
-
 from feataz.utils import check_data, find_eligible_categorical_variables, is_variable_available
 
 from typing import List, Optional, Dict, Union
-
 from pydantic import BaseModel
 
     
@@ -65,6 +63,7 @@ class OneHot():
         return self
 
     def transform(self, data):
+
         df = check_data(data)
 
         is_variable_available(df, self.var)
@@ -88,3 +87,8 @@ class OneHot():
             result = pl.concat([df,dum ], how = 'horizontal')
             
         return result
+    
+    def fit_transform(self, data):
+        result = self.fit(data).transform(data)
+
+        return  result
