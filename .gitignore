@@ -1,3 +1,9 @@
 .azenv
 .venv
 .feataz
+.Rproj.user
+.Rproj
+feataz.Rproj
+.Rhistory
+feataz/*.pyc
+*.pyc
