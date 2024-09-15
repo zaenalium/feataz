@@ -3,7 +3,6 @@ import pandas as pd
 import polars as pl
 from typing import Any, List, Union, Dict
 import polars as pl
-from typing import Any, List, Union, Dict
 import polars as pl
 from typing import List, Union
 
@@ -14,7 +13,163 @@ from feature_engine.variable_handling._variable_type_checks import (
     _is_categorical_and_is_datetime,
 )
 
+Variables = Union[int, str, List[Union[str, int]], Dict]
+DATETIME_TYPES = ("datetimetz", "datetime")
 
+def _check_variables_input_value(variables: Variables) -> Any:
+    """
+    Checks that the input value for the `variables` parameter located in the init of
+    all Feature-engine transformers is of the correct type.
+    Allowed  values are None, int, str or list of strings and integers.
+
+    Parameters
+    ----------
+    variables : string, int, list of strings, list of integers. Default=None
+
+    Returns
+    -------
+    variables: same as input
+    """
+
+    msg = (
+        "`variables` should contain a string, an integer or a list of strings or "
+        f"integers. Got {variables} instead."
+    )
+    msg_dupes = "The list entered in `variables` contains duplicated variable names."
+    msg_empty = "The list of `variables` is empty."
+
+    if variables is not None:
+        if isinstance(variables, list):
+            if not all(isinstance(i, (str, int)) for i in variables):
+                raise ValueError(msg)
+            if len(variables) == 0:
+                raise ValueError(msg_empty)
+            if len(variables) != len(set(variables)):
+                raise ValueError(msg_dupes)
+        else:
+            if not isinstance(variables, (str, int)):
+                raise ValueError(msg)
+    return variables
+
+
+def find_categorical_variables(X: pl.DataFrame) -> List[Union[str, int]]:
+    """
+    Returns a list with the names of all the categorical variables in a dataframe.
+    Note that variables cast as object that can be parsed to datetime will be
+    excluded.
+
+    More details in the :ref:`User Guide <find_cat_vars>`.
+
+    Parameters
+    ----------
+    X : pandas dataframe of shape = [n_samples, n_features]
+        The dataset
+
+    Returns
+    -------
+    variables: List
+        The names of the categorical variables.
+
+    Examples
+    --------
+    >>> import pandas as pd
+    >>> from feature_engine.variable_handling import find_categorical_variables
+    >>> X = pd.DataFrame({
+    >>>     "var_num": [1, 2, 3],
+    >>>     "var_cat": ["A", "B", "C"],
+    >>>     "var_date": pd.date_range("2020-02-24", periods=3, freq="T")
+    >>> })
+    >>> var_ = find_categorical_variables(X)
+    >>> var_
+    ['var_cat']
+    """
+    variables = [
+        column
+        for column in X.select_dtypes(include=["O", "category"]).columns
+        if _is_categorical_and_is_not_datetime(X[column])
+    ]
+    if len(variables) == 0:
+        raise TypeError(
+            "No categorical variables found in this dataframe. Please check "
+            "variable format with pandas dtypes."
+        )
+    return variables
+
+
+def find_all_variables(
+    X: pd.DataFrame,
+    exclude_datetime: bool = False,
+) -> List[Union[str, int]]:
+    """
+    Returns a list with the names of all the variables in the dataframe. It has the
+    option to exlcude variables that can be parsed as datetime or datetimetz.
+
+    More details in the :ref:`User Guide <find_all_vars>`.
+
+    Parameters
+    ----------
+    X : pandas dataframe of shape = [n_samples, n_features]
+        The dataset
+
+    exclude_datetime: bool, default=False
+        Whether to exclude datetime variables.
+
+    Returns
+    -------
+    variables: List
+        The names of the variables.
+
+    Examples
+    --------
+    >>> import pandas as pd
+    >>> from feature_engine.variable_handling import find_all_variables
+    >>> X = pd.DataFrame({
+    >>>     "var_num": [1, 2, 3],
+    >>>     "var_cat": ["A", "B", "C"],
+    >>>     "var_date": pd.date_range("2020-02-24", periods=3, freq="T")
+    >>> })
+    >>> vars_all = find_all_variables(X)
+    >>> vars_all
+    ['var_num', 'var_cat', 'var_date']
+    """
+    if exclude_datetime is True:
+        variables = X.select_dtypes(exclude=DATETIME_TYPES).columns.to_list()
+        variables = [
+            var
+            for var in variables
+            if is_numeric(X[var]) or not _is_categorical_and_is_datetime(X[var])
+        ]
+    else:
+        variables = X.columns.to_list()
+    return variables
+
+
+def _check_optional_contains_na(
+    X: pl.DataFrame, variables: List[Union[str, int]]
+) -> None:
+    """
+    Checks if DataFrame contains null values in the selected columns.
+
+    Parameters
+    ----------
+    X : Pandas DataFrame
+
+    variables : List
+        The selected group of variables in which null values will be examined.
+
+    Raises
+    ------
+    ValueError
+        If the variable(s) contain null values.
+    """
+
+    if X[variables].isnull().any().any():
+        raise ValueError(
+            "Some of the variables in the dataset contain NaN. Check and "
+            "remove those before using this transformer or set the parameter "
+            "`missing_values='ignore'` when initialising this transformer."
+        )
+    
 def check_data(X: Union[np.generic, np.ndarray, pd.DataFrame]) -> pd.DataFrame:
     """
     Checks if the input is a DataFrame and then creates a copy. This is an important
@@ -93,40 +248,40 @@ def check_data(X: Union[np.generic, np.ndarray, pd.DataFrame]) -> pd.DataFrame:
     return data
 
 
-def validate_variables(variables: Variables) -> Any:
-    """
-    Checks that the input value for the `variables` parameter located in the init of
-    all Feature-engine transformers is of the correct type.
-    Allowed  values are None, int, str or list of strings and integers.
+# def validate_variables(variables: Variables) -> Any:
+#     """
+#     Checks that the input value for the `variables` parameter located in the init of
+#     all Feature-engine transformers is of the correct type.
+#     Allowed  values are None, int, str or list of strings and integers.
 
-    Parameters
-    ----------
-    variables : string, int, list of strings, list of integers. Default=None
+#     Parameters
+#     ----------
+#     variables : string, int, list of strings, list of integers. Default=None
 
-    Returns
-    -------
-    variables: same as input
-    """
+#     Returns
+#     -------
+#     variables: same as input
+#     """
 
-    msg = (
-        "`variables` should contain a string, an integer or a list of strings or "
-        f"integers. Got {variables} instead."
-    )
-    msg_dupes = "The list entered in `variables` contains duplicated variable names."
-    msg_empty = "The list of `variables` is empty."
+#     msg = (
+#         "`variables` should contain a string, an integer or a list of strings or "
+#         f"integers. Got {variables} instead."
+#     )
+#     msg_dupes = "The list entered in `variables` contains duplicated variable names."
+#     msg_empty = "The list of `variables` is empty."
 
-    if variables is not None:
-        if isinstance(variables, list):
-            if not all(isinstance(i, (str, int)) for i in variables):
-                raise ValueError(msg)
-            if len(variables) == 0:
-                raise ValueError(msg_empty)
-            if len(variables) != len(set(variables)):
-                raise ValueError(msg_dupes)
-        else:
-            if not isinstance(variables, (str, int)):
-                raise ValueError(msg)
-    return variables
+#     if variables is not None:
+#         if isinstance(variables, list):
+#             if not all(isinstance(i, (str, int)) for i in variables):
+#                 raise ValueError(msg)
+#             if len(variables) == 0:
+#                 raise ValueError(msg_empty)
+#             if len(variables) != len(set(variables)):
+#                 raise ValueError(msg_dupes)
+#         else:
+#             if not isinstance(variables, (str, int)):
+#                 raise ValueError(msg)
+#     return variables
 
 
 def find_eligible_categorical_variables(X: pl.DataFrame, n_unique: int = 20) -> List[Union[str, int]]:

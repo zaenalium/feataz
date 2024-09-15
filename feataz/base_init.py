@@ -1,7 +1,7 @@
-from typing import Any, List, Union, Dict
+from typing import Any, List, Union, Dict, Literal
 import polars as pl
 import warnings
-from typing import List, Union
+from numpy.typing import ArrayLike
 
 import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -12,6 +12,8 @@ from feataz.utils import (
     check_categorical_variables,
     find_all_variables,
     find_categorical_variables,
+    _check_optional_contains_na,
+    _check_variables_input_value
 )
 
 class GetFeatureNamesOutMixin:
@@ -123,24 +125,16 @@ class CategoricalInitMixin:
     ----------
     {variables}.
 
-    {ignore_format}
     """
 
     def __init__(
         self,
         variables: Union[None, int, str, List[Union[str, int]]] = None,
-        ignore_format: bool = False,
+        missing_values: Literal['ignore', 'raise'] = 'replace'
     ) -> None:
-
-        if not isinstance(ignore_format, bool):
-            raise ValueError(
-                "ignore_format takes only booleans True and False. "
-                f"Got {ignore_format} instead."
-            )
-
+        
         self.variables = _check_variables_input_value(variables)
-        self.ignore_format = ignore_format
-
+        self.missing_values = missing_values
 
 class CategoricalInitMixinNA:
     """Shared initialization parameters across transformers. Sets and checks init
@@ -187,11 +181,11 @@ class CategoricalMethodsMixin(BaseEstimator, TransformerMixin, GetFeatureNamesOu
     - GetFeatureNamesOutMixin brings method get_feature_names_out().
     """
 
-    def _check_na(self, X: pl.DataFrameFrame, variables):
+    def _check_na(self, X: pl.DataFrame, variables):
         if self.missing_values == "raise":
             _check_optional_contains_na(X, variables)
 
-    def _check_or_select_variables(self, X: pl.DataFrameFrame):
+    def _check_or_select_variables(self, X: pl.DataFrame):
         """
         Finds categorical variables, or alternatively checks that the variables
         entered by the user are of type object (categorical).
@@ -223,7 +217,7 @@ class CategoricalMethodsMixin(BaseEstimator, TransformerMixin, GetFeatureNamesOu
 
         return variables_
 
-    def _get_feature_names_in(self, X: pl.DataFrameFrame):
+    def _get_feature_names_in(self, X: pl.DataFrame):
         """
         Returns attributes `featrure_names_in_` and `n_feature_names_in_`, which are
         standard for all transformers in the library.
@@ -234,7 +228,7 @@ class CategoricalMethodsMixin(BaseEstimator, TransformerMixin, GetFeatureNamesOu
         # save train set shape
         self.n_features_in_ = X.shape[1]
 
-    def _check_transform_input_and_state(self, X: pl.DataFrameFrame) -> pl.DataFrameFrame:
+    def _check_transform_input_and_state(self, X: pl.DataFrame) -> pl.DataFrame:
         """
         Checks that the input is a dataframe and of the same size than the one used
         in the fit method. Checks absence of NA.
@@ -271,7 +265,7 @@ class CategoricalMethodsMixin(BaseEstimator, TransformerMixin, GetFeatureNamesOu
 
         return X
 
-    def transform(self, X: pl.DataFrameFrame) -> pl.DataFrameFrame:
+    def transform(self, X: pl.DataFrame) -> pl.DataFrame:
         """Replace categories with the learned parameters.
 
         Parameters
@@ -295,7 +289,7 @@ class CategoricalMethodsMixin(BaseEstimator, TransformerMixin, GetFeatureNamesOu
 
         return X
 
-    def _encode(self, X: pl.DataFrameFrame) -> pl.DataFrameFrame:
+    def _encode(self, X: pl.DataFrame) -> pl.DataFrame:
         # replace categories by the learned parameters
         for feature in self.encoder_dict_.keys():
             X[feature] = X[feature].map(self.encoder_dict_[feature])
@@ -344,7 +338,7 @@ class CategoricalMethodsMixin(BaseEstimator, TransformerMixin, GetFeatureNamesOu
                     f"{nan_columns_str}."
                 )
 
-    def inverse_transform(self, X: pl.DataFrameFrame) -> pl.DataFrameFrame:
+    def inverse_transform(self, X: pl.DataFrame) -> pl.DataFrame:
         """Convert the encoded variable back to the original values.
 
         Parameters
