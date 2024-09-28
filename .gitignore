@@ -7,3 +7,5 @@ feataz.Rproj
 .Rhistory
 feataz/*.pyc
 *.pyc
+*.xyz
+.ipynb_*
