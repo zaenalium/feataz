@@ -5,3 +5,4 @@ feature_engine
 scorecardpy
 pyarrow
 polars
+duckdb
