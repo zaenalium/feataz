@@ -4,6 +4,8 @@ from typing import Iterable, List, Optional, Sequence, Tuple
 
 import polars as pl
 
+from .base import _ensure_polars_df, _ensure_polars_series
+
 
 def information_value(
     df: pl.DataFrame,
@@ -16,6 +18,8 @@ def information_value(
 
     If `bins` is provided and the feature is numeric, the feature is cut into bins before IV.
     """
+    df = _ensure_polars_df(df)
+
     if target not in df.columns or feature not in df.columns:
         raise ValueError("feature/target not found")
     s = df.get_column(feature)
@@ -44,6 +48,8 @@ def ks_statistic(df: pl.DataFrame, score: str, target: str) -> float:
 
     KS = max_x |TPR(x) - FPR(x)| with TPR/FPR computed over the score-sorted records.
     """
+    df = _ensure_polars_df(df)
+
     if score not in df.columns or target not in df.columns:
         raise ValueError("score/target not found")
     # Prepare sorted frame by score (ascending)
@@ -79,6 +85,9 @@ def psi(
 
     If `bins` is None, determines bins by quantiles of expected.
     """
+    expected = _ensure_polars_series(expected)
+    actual = _ensure_polars_series(actual)
+
     if bins is None:
         qs = [i / n_bins for i in range(1, n_bins)]
         quantiles = pl.DataFrame({"q": [expected.quantile(q) for q in qs]}).get_column("q").to_list()

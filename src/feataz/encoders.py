@@ -107,6 +107,7 @@ class OrdinalEncoder(Transformer):
     def transform(self, df: pl.DataFrame) -> pl.DataFrame:
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
+        df = _ensure_polars_df(df)
         out = df
         for col in self.feature_names_in_ or []:
             mapping = self.mappings_[col]

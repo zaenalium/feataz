@@ -8,9 +8,18 @@ and simple feature interactions with a consistent fit/transform API.
 Install
 -------
 
-This repo is source-only. Add `src` to your `PYTHONPATH`, e.g.:
+Install from PyPI:
 
-    export PYTHONPATH="$PWD/src:$PYTHONPATH"
+    pip install feataz
+
+Optional extras:
+
+- Decision-tree based transformers: `pip install feataz[sklearn]`
+- Accelerated similarity / numerical routines: `pip install feataz[accelerated]`
+
+From a cloned checkout you can also install in editable mode:
+
+    pip install -e .
 
 Optional dependencies (only for tree-based transformers):
 
