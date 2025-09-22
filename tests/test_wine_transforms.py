@@ -53,6 +53,7 @@ from feataz.snapshot import (
     TimeSnapshotAggregator,
     ToDateSnapshotAggregator,
 )
+from feataz.auto import AutoFeaturizer, suggest_methods
 
 try:  # optional dependency: numpy
     from feataz.vst import (
@@ -283,3 +284,60 @@ def test_outlier_handler_wine(wine_df: pl.DataFrame) -> None:
     flagged = clipper.fit_transform(df)
     assert flagged.height == df.height
     assert "alcohol__outlier" in flagged.columns
+
+
+def test_auto_featurizer_wine(wine_w_target: pl.DataFrame) -> None:
+    df = wine_w_target
+
+    auto = AutoFeaturizer(
+        max_ohe_cardinality=5,
+        add_ranks=True,
+        include_imputation=True,
+        include_outliers=True,
+        include_vst=True,
+        include_discretization=True,
+        discretize_bins=4,
+        skew_threshold=0.5,
+        time_column="ts",
+        time_windows=("30d",),
+        groupby=["target_str"],
+        interaction_aggs=("mean",),
+        target_column="target_bin",
+        include_target_encoders=True,
+    )
+
+    fitted = auto.fit(df)
+    plan = fitted.get_plan()
+
+    assert "target" in plan
+    # Verify supervised encoders were picked for categorical columns
+    target_plan = plan["target"]
+    assert any(target_plan.values()), "Expected at least one supervised encoder in plan"
+
+    transformed = auto.transform(df)
+    assert transformed.height == df.height
+    # Ensure new columns created
+    assert set(transformed.columns) != set(df.columns)
+
+
+def test_suggest_methods_wine(wine_w_target: pl.DataFrame) -> None:
+    df = wine_w_target
+    plan = suggest_methods(
+        df,
+        max_ohe_cardinality=5,
+        include_imputation=True,
+        include_outliers=True,
+        include_vst=True,
+        include_discretization=True,
+        discretize_bins=4,
+        skew_threshold=0.5,
+        time_column="ts",
+        groupby=["target_str"],
+        target_column="target_bin",
+        include_target_encoders=True,
+    )
+
+    assert "categorical" in plan
+    assert "numeric" in plan
+    assert "target" in plan
+    assert any(plan["target"].values()), "Expected supervised recommendations"

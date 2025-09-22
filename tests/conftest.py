@@ -62,6 +62,14 @@ def wine_with_time(wine_df: pl.DataFrame) -> pl.DataFrame:
 
 
 @pytest.fixture()
+def wine_w_target(wine_with_time: pl.DataFrame) -> pl.DataFrame:
+    df = wine_with_time
+    return df.with_columns(
+        (pl.col("target") == 0).cast(pl.Int64).alias("target_bin")
+    )
+
+
+@pytest.fixture()
 def positive_numeric_columns(wine_df: pl.DataFrame) -> list[str]:
     return [
         name

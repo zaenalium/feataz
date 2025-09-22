@@ -40,6 +40,7 @@ from .features import (
     DecisionTreeFeatures,
 )
 from .advanced import CrossFitTransformer
+from .auto import AutoFeaturizer, suggest_methods
 from .impute import (
     SimpleImputer,
     GroupImputer,
@@ -108,6 +109,8 @@ __all__ = [
     "CyclicalFeatures",
     "DecisionTreeFeatures",
     "CrossFitTransformer",
+    "AutoFeaturizer",
+    "suggest_methods",
     # Imputers
     "SimpleImputer",
     "GroupImputer",
