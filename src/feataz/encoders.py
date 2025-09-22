@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -236,6 +237,7 @@ class WeightOfEvidenceEncoder(Transformer):
         drop_original: bool = True,
         suffix: str = "__woe",
         multi_class: str = "auto",  # 'binary' | 'ovr' | 'auto'
+        positive_label: Optional[object] = None,
     ) -> None:
         self.target = target
         self.columns = None if columns is None else list(columns)
@@ -243,7 +245,11 @@ class WeightOfEvidenceEncoder(Transformer):
         self.drop_original = drop_original
         self.suffix = suffix
         self.multi_class = multi_class
+        self.positive_label = positive_label
         self.encodings_: Dict[str, pl.DataFrame] = {}
+        self.defaults_: Dict[str, Dict[str, float]] = {}
+        self.positive_label_: Optional[object] = None
+        self.negative_label_: Optional[object] = None
 
     def fit(self, df: pl.DataFrame) -> "WeightOfEvidenceEncoder":
         df = _ensure_polars_df(df)
@@ -252,6 +258,8 @@ class WeightOfEvidenceEncoder(Transformer):
         # check target classes
         unique_vals = df.get_column(self.target).drop_nulls().unique().to_list()
         n_classes = len(unique_vals)
+        if n_classes == 0:
+            raise ValueError("target column must contain at least one class value")
         mode = self.multi_class
         if mode == "auto":
             mode = "binary" if n_classes <= 2 else "ovr"
@@ -261,62 +269,103 @@ class WeightOfEvidenceEncoder(Transformer):
         self.feature_names_in_ = cols
         eps = self.eps
         self.encodings_.clear()
+        self.defaults_.clear()
+        self.positive_label_ = None
+        self.negative_label_ = None
         if mode == "binary":
-            total_pos = df.filter(pl.col(self.target) == 1).height
-            total_neg = df.filter(pl.col(self.target) == 0).height
+            if n_classes < 2:
+                raise ValueError("binary WoE encoding requires exactly two target classes")
+            if self.positive_label is not None:
+                pos_label = self.positive_label
+                if pos_label not in unique_vals:
+                    raise ValueError("positive_label not found in target column")
+                neg_candidates = [val for val in unique_vals if val != pos_label]
+                if len(neg_candidates) != 1:
+                    raise ValueError(
+                        "binary WoE encoding requires exactly two target classes when positive_label is provided"
+                    )
+                neg_label = neg_candidates[0]
+            else:
+                if n_classes != 2:
+                    raise ValueError("binary WoE encoding requires exactly two target classes")
+                sorted_vals = sorted(unique_vals)
+                neg_label, pos_label = sorted_vals[0], sorted_vals[-1]
+            self.positive_label_ = pos_label
+            self.negative_label_ = neg_label
+            total_counts = df.select(
+                [
+                    (pl.col(self.target) == pl.lit(pos_label)).sum().alias("pos"),
+                    (pl.col(self.target) == pl.lit(neg_label)).sum().alias("neg"),
+                ]
+            )
+            total_pos, total_neg = total_counts.row(0)
+            total_pos = float(total_pos)
+            total_neg = float(total_neg)
         else:
             classes = sorted(df.get_column(self.target).drop_nulls().unique().to_list())
             totals = {}
             for c in classes:
                 totals[c] = (
                     df.select([
-                        (pl.col(self.target) == c).sum().alias("pos"),
-                        (pl.col(self.target) != c).sum().alias("neg"),
+                        (pl.col(self.target) == pl.lit(c)).sum().alias("pos"),
+                        (pl.col(self.target) != pl.lit(c)).sum().alias("neg"),
                     ])
                     .row(0)
                 )
         eps = self.eps
         for col in cols:
             if mode == "binary":
+                encoded_col = f"{col}{self.suffix}"
+                default_val = math.log(
+                    (eps / (total_pos + eps * 2)) / (eps / (total_neg + eps * 2))
+                )
+                ratio_expr = (
+                    ((pl.col("pos") + eps) / (pl.lit(total_pos) + eps * 2))
+                    / ((pl.col("neg") + eps) / (pl.lit(total_neg) + eps * 2))
+                )
                 agg = (
                     df.group_by(col)
                     .agg([
-                        (pl.col(self.target) == 1).sum().alias("pos"),
-                        (pl.col(self.target) == 0).sum().alias("neg"),
+                        (pl.col(self.target) == pl.lit(pos_label)).sum().alias("pos"),
+                        (pl.col(self.target) == pl.lit(neg_label)).sum().alias("neg"),
                     ])
-                    .with_columns([
-                        (pl.col("pos") + eps) / (pl.lit(float(total_pos)) + eps * 2).alias("p_pos"),
-                        (pl.col("neg") + eps) / (pl.lit(float(total_neg)) + eps * 2).alias("p_neg"),
-                    ])
-                    .with_columns((pl.col("p_pos") / pl.col("p_neg")).log().alias(f"{col}{self.suffix}"))
-                    .select([col, f"{col}{self.suffix}"])
+                    .with_columns(ratio_expr.log().alias(encoded_col))
+                    .select([col, encoded_col])
                 )
                 self.encodings_[col] = agg
+                self.defaults_[col] = {encoded_col: default_val}
             else:
                 # one-vs-rest WoE per class
-                frames = []
-                classes = sorted(df.get_column(self.target).drop_nulls().unique().to_list())
+                frames: List[pl.DataFrame] = []
+                col_defaults: Dict[str, float] = {}
                 for c in classes:
                     tot_pos, tot_neg = totals[c]
+                    tot_pos = float(tot_pos)
+                    tot_neg = float(tot_neg)
+                    encoded_col = f"{col}{self.suffix}__{c}"
+                    default_val = math.log(
+                        (eps / (tot_pos + eps * 2)) / (eps / (tot_neg + eps * 2))
+                    )
+                    ratio_expr = (
+                        ((pl.col("pos") + eps) / (pl.lit(tot_pos) + eps * 2))
+                        / ((pl.col("neg") + eps) / (pl.lit(tot_neg) + eps * 2))
+                    )
                     a = (
                         df.group_by(col)
                         .agg([
-                            (pl.col(self.target) == c).sum().alias("pos"),
-                            (pl.col(self.target) != c).sum().alias("neg"),
+                            (pl.col(self.target) == pl.lit(c)).sum().alias("pos"),
+                            (pl.col(self.target) != pl.lit(c)).sum().alias("neg"),
                         ])
-                        .with_columns([
-                            (pl.col("pos") + eps) / (pl.lit(float(tot_pos)) + eps * 2).alias("p_pos"),
-                            (pl.col("neg") + eps) / (pl.lit(float(tot_neg)) + eps * 2).alias("p_neg"),
-                        ])
-                        .with_columns((pl.col("p_pos") / pl.col("p_neg")).log().alias(f"{col}{self.suffix}__{c}"))
-                        .select([col, f"{col}{self.suffix}__{c}"])
+                        .with_columns(ratio_expr.log().alias(encoded_col))
+                        .select([col, encoded_col])
                     )
                     frames.append(a)
-                # merge per class
+                    col_defaults[encoded_col] = default_val
                 enc = frames[0]
                 for fr in frames[1:]:
                     enc = enc.join(fr, on=col, how="outer")
                 self.encodings_[col] = enc
+                self.defaults_[col] = col_defaults
         self.is_fitted_ = True
         return self
 
@@ -327,10 +376,12 @@ class WeightOfEvidenceEncoder(Transformer):
         for col in self.feature_names_in_ or []:
             enc = self.encodings_[col]
             out = out.join(enc, on=col, how="left")
-            # fill all new columns with 0.0 for unseen categories
+            # fill all new columns with smoothed fallback for unseen categories
             new_cols = [c for c in enc.columns if c != col]
+            defaults = self.defaults_.get(col, {})
             for nc in new_cols:
-                out = out.with_columns(pl.col(nc).fill_null(0.0))
+                fill_value = defaults.get(nc, 0.0)
+                out = out.with_columns(pl.col(nc).fill_null(fill_value))
             if self.drop_original:
                 out = out.drop(col)
         return out
@@ -658,10 +709,19 @@ class BinaryEncoder(Transformer):
         for col in self.feature_names_in_ or []:
             mapping = self.ordinal_maps_[col]
             n_bits = self.n_bits_[col]
-            out = out.with_columns(pl.col(col).cast(pl.Utf8).map_elements(lambda x, m=mapping: m.get(x, 0), return_dtype=pl.Int64).alias(f"{col}{self.prefix}ord"))
+            ord_col = f"{col}{self.prefix}ord"
+            out = out.with_columns(
+                pl.col(col)
+                .cast(pl.Utf8)
+                .map_elements(lambda x, m=mapping: m.get(x, 0), return_dtype=pl.Int64)
+                .alias(ord_col)
+            )
             for b in range(n_bits):
-                out = out.with_columns(((pl.col(f"{col}{self.prefix}ord") >> b) & 1).cast(pl.Int8).alias(f"{col}{self.prefix}{b}"))
-            out = out.drop(f"{col}{self.prefix}ord")
+                shift = 1 << b
+                out = out.with_columns(
+                    ((pl.col(ord_col) // shift) % 2).cast(pl.Int8).alias(f"{col}{self.prefix}{b}")
+                )
+            out = out.drop(ord_col)
             if self.drop_original:
                 out = out.drop(col)
         return out
