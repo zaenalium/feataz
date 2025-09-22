@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+import numpy as np
+
 import polars as pl
 
 from .base import Transformer, _as_list, _ensure_polars_df
@@ -359,6 +361,8 @@ class DecisionTreeEncoder(Transformer):
         self.trees_: Dict[str, object] = {}
         self.ordinal_maps_: Dict[str, Dict[str, int]] = {}
         self.global_value_: float | None = None
+        self.problem_: Optional[str] = None
+        self.class_prior_map_: Optional[Dict[object, float]] = None
 
     def fit(self, df: pl.DataFrame) -> "DecisionTreeEncoder":
         try:
@@ -373,8 +377,11 @@ class DecisionTreeEncoder(Transformer):
             raise ValueError(f"target column '{self.target}' not found")
         cols = _infer_categorical_columns(df, self.columns)
         self.feature_names_in_ = cols
-        y = df.get_column(self.target).to_numpy()
-        self.global_value_ = float(pl.Series(y).mean())
+        target_series = df.get_column(self.target)
+        non_null = target_series.drop_nulls()
+        y = target_series.to_numpy()
+        self.global_value_ = None
+        self.class_prior_map_ = None
         self.trees_.clear()
         self.ordinal_maps_.clear()
 
@@ -382,11 +389,42 @@ class DecisionTreeEncoder(Transformer):
         problem = self.problem
         if problem == "auto":
             # heuristic: <= 20 unique -> classification
-            n_unique = len(pl.Series(y).drop_nulls().unique())
-            if n_unique <= 20 and pl.Series(y).dtype in (pl.Int64, pl.Int32, pl.UInt32, pl.UInt64, pl.Boolean):
+            n_unique = len(non_null.unique())
+            dtype = target_series.dtype
+            integer_like: List[pl.DataType] = []
+            for name in ["Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16", "UInt32", "UInt64"]:
+                dt = getattr(pl, name, None)
+                if dt is not None:
+                    integer_like.append(dt)
+            string_like: List[pl.DataType] = []
+            for name in ["Utf8", "String", "Categorical"]:
+                dt = getattr(pl, name, None)
+                if dt is not None:
+                    string_like.append(dt)
+            is_object_dtype = str(dtype).lower() == "object"
+            if n_unique <= 20 and (
+                dtype == pl.Boolean
+                or dtype in integer_like
+                or dtype in string_like
+                or is_object_dtype
+            ):
                 problem = "classification"
             else:
                 problem = "regression"
+        self.problem_ = problem
+
+        if problem == "classification":
+            target_values = non_null.to_list()
+            if target_values:
+                values, counts = np.unique(np.array(target_values, dtype=object), return_counts=True)
+                total = counts.sum()
+                priors = {val: (cnt / total) for val, cnt in zip(values, counts)}
+            else:
+                priors = {}
+            self.class_prior_map_ = priors
+        else:
+            mean_val = target_series.mean()
+            self.global_value_ = float(mean_val) if mean_val is not None else 0.0
 
         for col in cols:
             # ordinal map
@@ -397,7 +435,12 @@ class DecisionTreeEncoder(Transformer):
             self.ordinal_maps_[col] = mapping
             X = (
                 df.select(pl.col(col).cast(pl.Utf8))
-                .with_columns(pl.col(col).map_elements(lambda x: mapping.get(x, -1)).alias(col))
+                .with_columns(
+                    pl.col(col)
+                    .map_elements(lambda x: mapping.get(x, -1), return_dtype=pl.Int64)
+                    .fill_null(-1)
+                    .alias(col)
+                )
                 .get_column(col)
                 .to_numpy()
                 .reshape(-1, 1)
@@ -424,28 +467,78 @@ class DecisionTreeEncoder(Transformer):
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
         out = df
-        global_val = float(self.global_value_ if self.global_value_ is not None else 0.0)
+        problem = self.problem_ or self.problem
+        prior_map = self.class_prior_map_ if problem == "classification" else None
+        global_val = 0.0
+        if problem != "classification":
+            global_val = float(self.global_value_ if self.global_value_ is not None else 0.0)
+
         for col in self.feature_names_in_ or []:
             mapping = self.ordinal_maps_[col]
             tree = self.trees_[col]
-            X = (
-                df.select(pl.col(col).cast(pl.Utf8))
-                .with_columns(pl.col(col).map_elements(lambda x: mapping.get(x, -1)).alias(col))
+            encoded_series = (
+                df.select(
+                    pl.col(col)
+                    .cast(pl.Utf8)
+                    .map_elements(lambda x: mapping.get(x, -1), return_dtype=pl.Int64)
+                    .fill_null(-1)
+                    .alias(col)
+                )
                 .get_column(col)
-                .to_numpy()
-                .reshape(-1, 1)
             )
-            # predictions as encoding
-            try:
-                y_hat = tree.predict_proba(X)[:, 1]  # type: ignore[attr-defined]
-            except Exception:
-                y_hat = tree.predict(X)
-            new_col = f"{col}{self.suffix}"
-            out = out.with_columns(pl.Series(name=new_col, values=y_hat))
-            if self.drop_original:
-                out = out.drop(col)
-            # Replace possible nans from unknowns
-            out = out.with_columns(pl.col(new_col).fill_nan(global_val))
+            encoded_np = encoded_series.to_numpy()
+            X = encoded_np.reshape(-1, 1)
+            unknown_mask = encoded_np == -1
+
+            if problem == "classification":
+                proba_method = getattr(tree, "predict_proba", None)
+                if callable(proba_method):
+                    try:
+                        probas = np.asarray(proba_method(X), dtype=float)
+                    except Exception:
+                        probas = None
+                    else:
+                        if probas.ndim == 1:
+                            probas = probas.reshape(-1, 1)
+                        classes = getattr(tree, "classes_", None)
+                        if classes is not None:
+                            class_list = list(classes)
+                            if prior_map:
+                                fallback = np.array([prior_map.get(cls, 0.0) for cls in class_list], dtype=float)
+                            elif len(class_list) > 0:
+                                fallback = np.full(len(class_list), 1.0 / len(class_list), dtype=float)
+                            else:
+                                fallback = np.array([], dtype=float)
+                            if unknown_mask.any() and fallback.size:
+                                probas[unknown_mask, :] = fallback
+                            new_columns = []
+                            for idx, cls in enumerate(class_list):
+                                col_name = f"{col}{self.suffix}__{cls}"
+                                new_columns.append(pl.Series(name=col_name, values=probas[:, idx]))
+                            out = out.with_columns(new_columns)
+                            if self.drop_original:
+                                out = out.drop(col)
+                            continue
+
+            y_hat = tree.predict(X)
+            if problem == "classification":
+                y_hat_arr = np.asarray(y_hat, dtype=object)
+                if unknown_mask.any() and prior_map:
+                    fallback_label = max(prior_map.items(), key=lambda kv: kv[1])[0]
+                    y_hat_arr[unknown_mask] = fallback_label
+                new_col = f"{col}{self.suffix}"
+                out = out.with_columns(pl.Series(name=new_col, values=list(y_hat_arr)))
+                if self.drop_original:
+                    out = out.drop(col)
+            else:
+                y_hat_arr = np.asarray(y_hat, dtype=float)
+                if unknown_mask.any():
+                    y_hat_arr[unknown_mask] = global_val
+                new_col = f"{col}{self.suffix}"
+                out = out.with_columns(pl.Series(name=new_col, values=y_hat_arr))
+                if self.drop_original:
+                    out = out.drop(col)
+                out = out.with_columns(pl.col(new_col).fill_nan(global_val))
         return out
 
 
