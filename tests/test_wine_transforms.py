@@ -108,6 +108,43 @@ def test_encoders_transform_wine(wine_df: pl.DataFrame) -> None:
         _ensure_new_columns(df, transformed)
 
 
+def test_weight_of_evidence_boolean_target(wine_df: pl.DataFrame) -> None:
+    df = wine_df.with_columns(
+        (pl.col("target") == 0).alias("target_bool")
+    )
+    encoder = WeightOfEvidenceEncoder(
+        target="target_bool",
+        columns=["target_str"],
+        multi_class="binary",
+        drop_original=False,
+    )
+    transformed = encoder.fit_transform(df)
+    woe_col = "target_str__woe"
+    fallback = encoder.defaults_["target_str"][woe_col]
+    assert transformed.select(pl.col(woe_col).n_unique()).item() > 1
+    assert transformed.filter(pl.col(woe_col) != fallback).height > 0
+
+
+def test_weight_of_evidence_string_binary_target(wine_df: pl.DataFrame) -> None:
+    df = wine_df.with_columns(
+        pl.when(pl.col("target") == 0)
+        .then(pl.lit("zero"))
+        .otherwise(pl.lit("non_zero"))
+        .alias("target_str_bin")
+    )
+    encoder = WeightOfEvidenceEncoder(
+        target="target_str_bin",
+        columns=["target_str"],
+        multi_class="binary",
+        drop_original=False,
+    )
+    transformed = encoder.fit_transform(df)
+    woe_col = "target_str__woe"
+    fallback = encoder.defaults_["target_str"][woe_col]
+    assert transformed.select(pl.col(woe_col).n_unique()).item() > 1
+    assert transformed.filter(pl.col(woe_col) != fallback).height > 0
+
+
 def test_discretizers_transform_wine(wine_df: pl.DataFrame) -> None:
     df = wine_df.select(["alcohol", "malic_acid"])
     discretizers = [

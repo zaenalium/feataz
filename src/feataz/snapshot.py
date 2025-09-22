@@ -444,7 +444,7 @@ class EWMAggregator(Transformer):
             return out
 
         if groupby:
-            out = df.group_by(groupby, maintain_order=True).map_groups(ewm_group)
+            out = df.group_by(*groupby, maintain_order=True).map_groups(ewm_group)
         else:
             out = ewm_group(df)
         if self.drop_original:

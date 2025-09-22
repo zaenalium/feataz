@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence
 
 import polars as pl
 import numpy as np
@@ -114,9 +114,12 @@ class AutoFeaturizer(Transformer):
 
         self.pipeline_: List[Transformer] = []
         self.plan_: Dict[str, Dict[str, List[str]]] = {}
+        self.numeric_cols_: List[str] = []
 
     def fit(self, df: pl.DataFrame) -> "AutoFeaturizer":
         df = _ensure_polars_df(df)
+
+        groupby_cols = set(self.groupby or [])
 
         cat_cols = _categorical_columns(df)
         bool_cols = [n for n, dt in zip(df.columns, df.dtypes) if dt == pl.Boolean]
@@ -126,6 +129,8 @@ class AutoFeaturizer(Transformer):
             cat_cols = [c for c in cat_cols if c != self.target_column]
             bool_cols = [c for c in bool_cols if c != self.target_column]
             num_cols = [c for c in num_cols if c != self.target_column]
+
+        self.numeric_cols_ = list(num_cols)
 
         # decide categorical encoding sets
         ohe_cols: List[str] = []
@@ -192,48 +197,67 @@ class AutoFeaturizer(Transformer):
                 }
             cat_for_target = [c for c in (cat_cols + bool_cols) if c != self.target_column]
             if cat_for_target:
+                target_keep = [c for c in cat_for_target if c in groupby_cols]
+                target_drop = [c for c in cat_for_target if c not in groupby_cols]
+
+                encoder_factory: Callable[[Sequence[str], bool], Transformer] | None
+                plan_key: str | None
                 if is_numeric_target and target_unique > 2:
-                    pipeline.append(
-                        MeanEncoder(
-                            target=self.target_column,
-                            columns=cat_for_target,
-                            smoothing=5.0,
-                            drop_original=self.drop_original,
-                        )
+                    encoder_factory = lambda cols, drop: MeanEncoder(  # type: ignore[assignment]
+                        target=self.target_column,
+                        columns=cols,
+                        smoothing=5.0,
+                        drop_original=drop,
                     )
-                    plan["target"]["mean_encoder"] = list(cat_for_target)
+                    plan_key = "mean_encoder"
                 else:
                     if target_unique == 2:
-                        pipeline.append(
-                            WeightOfEvidenceEncoder(
-                                target=self.target_column,
-                                columns=cat_for_target,
-                                drop_original=self.drop_original,
-                            )
+                        encoder_factory = lambda cols, drop: WeightOfEvidenceEncoder(  # type: ignore[assignment]
+                            target=self.target_column,
+                            columns=cols,
+                            drop_original=drop,
                         )
-                        plan["target"]["weight_of_evidence"] = list(cat_for_target)
+                        plan_key = "weight_of_evidence"
                     else:
-                        pipeline.append(
-                            LeaveOneOutEncoder(
-                                target=self.target_column,
-                                columns=cat_for_target,
-                                smoothing=5.0,
-                                drop_original=self.drop_original,
-                            )
+                        encoder_factory = lambda cols, drop: LeaveOneOutEncoder(  # type: ignore[assignment]
+                            target=self.target_column,
+                            columns=cols,
+                            smoothing=5.0,
+                            drop_original=drop,
                         )
-                        plan["target"]["leave_one_out"] = list(cat_for_target)
-                    # remove columns from unsupervised categorical encoders to avoid dropping them twice
-                    ohe_cols = [c for c in ohe_cols if c not in cat_for_target]
-                    freq_cols = [c for c in freq_cols if c not in cat_for_target]
+                        plan_key = "leave_one_out"
+
+                if encoder_factory and plan_key:
+                    encoded: List[str] = []
+                    for cols, drop in ((target_drop, self.drop_original), (target_keep, False)):
+                        if cols:
+                            pipeline.append(encoder_factory(cols, drop))
+                            encoded.extend(cols)
+                    if encoded:
+                        plan["target"][plan_key] = list(encoded)
+
+                ohe_cols = [c for c in ohe_cols if c not in cat_for_target]
+                freq_cols = [c for c in freq_cols if c not in cat_for_target]
 
         if ohe_cols:
-            # for low-card sets, drop_first to prevent multicollinearity
-            pipeline.append(OneHotEncoder(columns=ohe_cols, drop_first=True, drop_original=self.drop_original))
-            plan["categorical"]["one_hot"] = list(ohe_cols)
+            drop_cols = [c for c in ohe_cols if c not in groupby_cols]
+            keep_cols = [c for c in ohe_cols if c in groupby_cols]
+            encoded: List[str] = []
+            if drop_cols:
+                pipeline.append(
+                    OneHotEncoder(columns=drop_cols, drop_first=True, drop_original=self.drop_original)
+                )
+                encoded.extend(drop_cols)
+            if keep_cols:
+                pipeline.append(OneHotEncoder(columns=keep_cols, drop_first=True, drop_original=False))
+                encoded.extend(keep_cols)
+            if encoded:
+                plan["categorical"]["one_hot"] = list(encoded)
         if freq_cols:
-            # for very high cardinality, optionally reduce via rare label first
+            drop_cols = [c for c in freq_cols if c not in groupby_cols]
+            keep_cols = [c for c in freq_cols if c in groupby_cols]
             high_card: List[str] = []
-            for c in freq_cols:
+            for c in drop_cols:
                 try:
                     n_unique = int(df.get_column(c).drop_nulls().n_unique())
                 except Exception:
@@ -243,53 +267,73 @@ class AutoFeaturizer(Transformer):
             if high_card:
                 pipeline.append(RareLabelEncoder(columns=high_card, min_frequency=0.01, drop_original=False))
                 plan["categorical"]["rare_label"] = list(high_card)
-            pipeline.append(CountFrequencyEncoder(columns=freq_cols, normalize=True, drop_original=self.drop_original))
-            plan["categorical"]["count_freq"] = list(freq_cols)
+            encoded: List[str] = []
+            if drop_cols:
+                pipeline.append(
+                    CountFrequencyEncoder(columns=drop_cols, normalize=True, drop_original=self.drop_original)
+                )
+                encoded.extend(drop_cols)
+            if keep_cols:
+                pipeline.append(CountFrequencyEncoder(columns=keep_cols, normalize=True, drop_original=False))
+                encoded.extend(keep_cols)
+            if encoded:
+                plan["categorical"]["count_freq"] = list(encoded)
 
         if num_cols:
-            pipeline.append(RobustScaler(columns=num_cols, drop_original=self.drop_original))
-            plan["numeric"]["robust_scale"] = list(num_cols)
+            # Outlier handling (optional) before other numeric transforms
+            if self.include_outliers:
+                pipeline.append(ClipOutliers(columns=num_cols, method="iqr", action="clip"))
+                plan["outliers"]["clip_iqr"] = list(num_cols)
+
+            # Variance-stabilizing transforms for skew
+            if self.include_vst:
+                pos_cols: List[str] = []
+                any_cols: List[str] = []
+                for c in num_cols:
+                    s = df.get_column(c).cast(pl.Float64)
+                    arr = np.array(s.to_list(), dtype=float)
+                    if arr.size < 3 or np.nanstd(arr) == 0:
+                        continue
+                    mu = float(np.nanmean(arr))
+                    sd = float(np.nanstd(arr))
+                    if sd == 0:
+                        continue
+                    skew = float(np.nanmean(((arr - mu) / (sd if sd != 0 else 1.0)) ** 3))
+                    if abs(skew) >= self.skew_threshold:
+                        if np.nanmin(arr) > 0:
+                            pos_cols.append(c)
+                        else:
+                            any_cols.append(c)
+                if pos_cols:
+                    pipeline.append(LogTransformer(columns=pos_cols, drop_original=False))
+                    plan["numeric"]["log_transform"] = list(pos_cols)
+                if any_cols:
+                    pipeline.append(YeoJohnsonTransformer(columns=any_cols, drop_original=False))
+                    plan["numeric"]["yeojohnson"] = list(any_cols)
+
+            # Discretization (optional)
+            if self.include_discretization:
+                disc_cols = [
+                    c
+                    for c in num_cols
+                    if df.get_column(c).drop_nulls().n_unique() > (self.discretize_bins * 2)
+                ]
+                if disc_cols:
+                    pipeline.append(
+                        EqualFrequencyDiscretizer(
+                            columns=disc_cols,
+                            n_bins=self.discretize_bins,
+                            drop_original=False,
+                        )
+                    )
+                    plan["numeric"]["discretize_equal_freq"] = list(disc_cols)
+
             if self.add_ranks:
                 pipeline.append(QuantileRankTransformer(columns=num_cols, drop_original=False))
                 plan["numeric"]["ranks"] = list(num_cols)
 
-        # Outlier handling (optional)
-        if self.include_outliers and num_cols:
-            pipeline.append(ClipOutliers(columns=num_cols, method="iqr", action="clip"))
-            plan["outliers"]["clip_iqr"] = list(num_cols)
-
-        # Variance-stabilizing transforms for skew
-        if self.include_vst and num_cols:
-            pos_cols: List[str] = []
-            any_cols: List[str] = []
-            for c in num_cols:
-                s = df.get_column(c).cast(pl.Float64)
-                arr = np.array(s.to_list(), dtype=float)
-                if arr.size < 3 or np.nanstd(arr) == 0:
-                    continue
-                mu = float(np.nanmean(arr))
-                sd = float(np.nanstd(arr))
-                if sd == 0:
-                    continue
-                skew = float(np.nanmean(((arr - mu) / (sd if sd != 0 else 1.0)) ** 3))
-                if abs(skew) >= self.skew_threshold:
-                    if np.nanmin(arr) > 0:
-                        pos_cols.append(c)
-                    else:
-                        any_cols.append(c)
-            if pos_cols:
-                pipeline.append(LogTransformer(columns=pos_cols, drop_original=False))
-                plan["numeric"]["log_transform"] = list(pos_cols)
-            if any_cols:
-                pipeline.append(YeoJohnsonTransformer(columns=any_cols, drop_original=False))
-                plan["numeric"]["yeojohnson"] = list(any_cols)
-
-        # Discretization (optional)
-        if self.include_discretization and num_cols:
-            disc_cols = [c for c in num_cols if df.get_column(c).drop_nulls().n_unique() > (self.discretize_bins * 2)]
-            if disc_cols:
-                pipeline.append(EqualFrequencyDiscretizer(columns=disc_cols, n_bins=self.discretize_bins, drop_original=False))
-                plan["numeric"]["discretize_equal_freq"] = list(disc_cols)
+            pipeline.append(RobustScaler(columns=num_cols, drop_original=False))
+            plan["numeric"]["robust_scale"] = list(num_cols)
 
         # Time snapshot features (opt-in)
         if self.time_column and self.time_column in df.columns:
@@ -332,6 +376,15 @@ class AutoFeaturizer(Transformer):
         out = _ensure_polars_df(df)
         for t in self.pipeline_:
             out = t.transform(out)
+        if self.drop_original and self.numeric_cols_:
+            keep_cols = set(self.groupby or [])
+            if self.time_column:
+                keep_cols.add(self.time_column)
+            if self.target_column:
+                keep_cols.add(self.target_column)
+            drop_cols = [c for c in self.numeric_cols_ if c not in keep_cols and c in out.columns]
+            if drop_cols:
+                out = out.drop(drop_cols)
         return out
 
     # Convenience

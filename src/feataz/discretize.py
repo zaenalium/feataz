@@ -29,6 +29,25 @@ def _make_bins_safe(edges: List[float]) -> List[float]:
     return edges_sorted
 
 
+def _compute_quantiles(df: pl.DataFrame, column: str, probs: Sequence[float]) -> Sequence[float]:
+    exprs = [
+        pl.col(column).quantile(q).alias(f"__{column}_quantile_{i}__")
+        for i, q in enumerate(probs)
+    ]
+    if not exprs:
+        return []
+    return df.select(exprs).row(0)
+
+
+def _cut_to_bins(column: str, edges: Sequence[float], alias: str, labels_as_int: bool) -> pl.Expr:
+    labels = [str(i) for i in range(len(edges) - 1)] if labels_as_int else None
+    breaks = [float(b) for b in edges[1:-1]] if len(edges) > 2 else []
+    expr = pl.col(column).cast(pl.Float64).cut(breaks, labels=labels)
+    if labels_as_int and labels is not None:
+        expr = expr.to_physical().cast(pl.Int32)
+    return expr.alias(alias)
+
+
 class EqualFrequencyDiscretizer(Transformer):
     def __init__(
         self,
@@ -52,7 +71,7 @@ class EqualFrequencyDiscretizer(Transformer):
         self.bins_.clear()
         qs = [i / self.n_bins for i in range(1, self.n_bins)]
         for col in cols:
-            quantiles = df.select([pl.col(col).quantile(q) for q in qs]).row(0)
+            quantiles = _compute_quantiles(df, col, qs)
             edges = [-float("inf")] + [float(q) for q in quantiles] + [float("inf")]
             self.bins_[col] = _make_bins_safe(edges)
         self.is_fitted_ = True
@@ -64,11 +83,8 @@ class EqualFrequencyDiscretizer(Transformer):
         out = df
         for col in self.feature_names_in_ or []:
             edges = self.bins_[col]
-            labels = list(range(len(edges) - 1)) if self.labels_as_int else None
             new_col = f"{col}{self.suffix}"
-            out = out.with_columns(
-                pl.col(col).cast(pl.Float64).cut(bins=edges, labels=labels).alias(new_col)
-            )
+            out = out.with_columns(_cut_to_bins(col, edges, new_col, self.labels_as_int))
             if self.drop_original:
                 out = out.drop(col)
         return out
@@ -116,9 +132,8 @@ class EqualWidthDiscretizer(Transformer):
         out = df
         for col in self.feature_names_in_ or []:
             edges = self.bins_[col]
-            labels = list(range(len(edges) - 1)) if self.labels_as_int else None
             new_col = f"{col}{self.suffix}"
-            out = out.with_columns(pl.col(col).cast(pl.Float64).cut(edges, labels=labels).alias(new_col))
+            out = out.with_columns(_cut_to_bins(col, edges, new_col, self.labels_as_int))
             if self.drop_original:
                 out = out.drop(col)
         return out
@@ -159,9 +174,8 @@ class ArbitraryDiscretizer(Transformer):
             raise RuntimeError("Call fit before transform")
         out = df
         for col, edges in self.bins_.items():
-            labels = list(range(len(edges) - 1)) if self.labels_as_int else None
             new_col = f"{col}{self.suffix}"
-            out = out.with_columns(pl.col(col).cast(pl.Float64).cut(edges, labels=labels).alias(new_col))
+            out = out.with_columns(_cut_to_bins(col, edges, new_col, self.labels_as_int))
             if self.drop_original:
                 out = out.drop(col)
         return out
@@ -244,9 +258,8 @@ class DecisionTreeDiscretizer(Transformer):
             raise RuntimeError("Call fit before transform")
         out = df
         for col, edges in self.bins_.items():
-            labels = list(range(len(edges) - 1)) if self.labels_as_int else None
             new_col = f"{col}{self.suffix}"
-            out = out.with_columns(pl.col(col).cast(pl.Float64).cut(edges, labels=labels).alias(new_col))
+            out = out.with_columns(_cut_to_bins(col, edges, new_col, self.labels_as_int))
             if self.drop_original:
                 out = out.drop(col)
         return out
@@ -303,9 +316,8 @@ class GeometricWidthDiscretizer(Transformer):
             raise RuntimeError("Call fit before transform")
         out = df
         for col, edges in self.bins_.items():
-            labels = list(range(len(edges) - 1)) if self.labels_as_int else None
             new_col = f"{col}{self.suffix}"
-            out = out.with_columns(pl.col(col).cast(pl.Float64).cut(edges, labels=labels).alias(new_col))
+            out = out.with_columns(_cut_to_bins(col, edges, new_col, self.labels_as_int))
             if self.drop_original:
                 out = out.drop(col)
         return out
@@ -359,9 +371,8 @@ class KMeansDiscretizer(Transformer):
             centers = self.centers_[col]
             # create edges halfway between centers
             edges = [-float("inf")] + [float((centers[i] + centers[i + 1]) / 2.0) for i in range(len(centers) - 1)] + [float("inf")]
-            labels = list(range(len(edges) - 1)) if self.labels_as_int else None
             new_col = f"{col}{self.suffix}"
-            out = out.with_columns(pl.col(col).cast(pl.Float64).cut(edges, labels=labels).alias(new_col))
+            out = out.with_columns(_cut_to_bins(col, edges, new_col, self.labels_as_int))
             if self.drop_original:
                 out = out.drop(col)
         return out
@@ -500,9 +511,8 @@ class MDLPDiscretizer(Transformer):
             raise RuntimeError("Call fit before transform")
         out = df
         for col, edges in self.bins_.items():
-            labels = list(range(len(edges) - 1)) if self.labels_as_int else None
             new_col = f"{col}{self.suffix}"
-            out = out.with_columns(pl.col(col).cast(pl.Float64).cut(edges, labels=labels).alias(new_col))
+            out = out.with_columns(_cut_to_bins(col, edges, new_col, self.labels_as_int))
             if self.drop_original:
                 out = out.drop(col)
         return out
@@ -585,11 +595,11 @@ class ChiMergeDiscretizer(Transformer):
             # initial edges by quantiles
             n_init = max(2, min(self.initial_bins, s.drop_nulls().n_unique()))
             qs = [i / n_init for i in range(1, n_init)]
-            quantiles = df.select([pl.col(col).quantile(q) for q in qs]).row(0)
+            quantiles = _compute_quantiles(df, col, qs)
             edges = [-float("inf")] + [float(q) for q in quantiles] + [float("inf")]
             # build initial pos/neg per bin
             tmp = df.select([
-                pl.col(col).cast(pl.Float64).cut(edges, labels=list(range(len(edges) - 1))).alias("__bin__"),
+                _cut_to_bins(col, edges, "__bin__", True),
                 y.alias("__y__"),
             ])
             agg = tmp.group_by("__bin__").agg([
@@ -652,9 +662,8 @@ class ChiMergeDiscretizer(Transformer):
             raise RuntimeError("Call fit before transform")
         out = df
         for col, edges in self.bins_.items():
-            labels = list(range(len(edges) - 1)) if self.labels_as_int else None
             new_col = f"{col}{self.suffix}"
-            out = out.with_columns(pl.col(col).cast(pl.Float64).cut(edges, labels=labels).alias(new_col))
+            out = out.with_columns(_cut_to_bins(col, edges, new_col, self.labels_as_int))
             if self.drop_original:
                 out = out.drop(col)
         return out
@@ -771,9 +780,8 @@ class IsotonicBinningDiscretizer(Transformer):
             raise RuntimeError("Call fit before transform")
         out = df
         for col, edges in self.bins_.items():
-            labels = list(range(len(edges) - 1)) if self.labels_as_int else None
             new_col = f"{col}{self.suffix}"
-            out = out.with_columns(pl.col(col).cast(pl.Float64).cut(edges, labels=labels).alias(new_col))
+            out = out.with_columns(_cut_to_bins(col, edges, new_col, self.labels_as_int))
             if self.drop_original:
                 out = out.drop(col)
         return out
@@ -893,10 +901,10 @@ class MonotonicOptimalBinningDiscretizer(Transformer):
             # initial quantile edges
             n_init = max(2, min(self.initial_bins, int(s.drop_nulls().n_unique())))
             qs = [i / n_init for i in range(1, n_init)]
-            quantiles = df.select([pl.col(col).quantile(q) for q in qs]).row(0)
+            quantiles = _compute_quantiles(df, col, qs)
             edges = [-float("inf")] + [float(q) for q in quantiles] + [float("inf")]
             tmp = df.select([
-                pl.col(col).cast(pl.Float64).cut(edges, labels=list(range(len(edges) - 1))).alias("__bin__"),
+                _cut_to_bins(col, edges, "__bin__", True),
                 y.alias("__y__"),
             ])
             agg = tmp.group_by("__bin__").agg([
@@ -954,9 +962,8 @@ class MonotonicOptimalBinningDiscretizer(Transformer):
             raise RuntimeError("Call fit before transform")
         out = df
         for col, edges in self.bins_.items():
-            labels = list(range(len(edges) - 1)) if self.labels_as_int else None
             new_col = f"{col}{self.suffix}"
-            out = out.with_columns(pl.col(col).cast(pl.Float64).cut(edges, labels=labels).alias(new_col))
+            out = out.with_columns(_cut_to_bins(col, edges, new_col, self.labels_as_int))
             if self.drop_original:
                 out = out.drop(col)
         return out
