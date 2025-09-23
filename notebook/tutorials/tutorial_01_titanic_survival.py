@@ -1,0 +1,152 @@
+# ---
+# jupyter:
+#   jupytext:
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.15.0
+#   kernelspec:
+#     display_name: Python 3
+#     language: python
+#     name: python3
+# ---
+
+# %% [markdown]
+# # Feature Engineering on the Titanic Survival Dataset
+#
+# The Titanic survival data is a classic binary classification task that mixes categorical and
+# numerical signals. We'll combine a few `feataz` transformers to create a modeling table that is
+# ready for a gradient boosting or tree-based learner.
+#
+# - **Source**: [datasciencedojo/datasets](https://github.com/datasciencedojo/datasets/blob/master/titanic.csv)
+# - **Task**: Predict whether a passenger survived (`Survived`)
+# - **Features**: Ticket class, sex, age, fare, family counts, port of embarkation
+#
+# We'll use `polars` for data loading and `feataz` for automated feature preparation.
+
+# %% [markdown]
+# ## Setup
+
+# %%
+import polars as pl
+from feataz import (
+    AutoFeaturizer,
+    ClipOutliers,
+    MeanEncoder,
+    OneHotEncoder,
+    SimpleImputer,
+    suggest_methods,
+)
+
+pl.Config.set_tbl_rows(10)
+pl.Config.set_tbl_cols(12)
+
+# %% [markdown]
+# ## Load the dataset
+#
+# The CSV file is hosted on GitHub. `polars` can stream the file directly over HTTP.
+
+# %%
+SOURCE_URL = "https://raw.githubusercontent.com/datasciencedojo/datasets/master/titanic.csv"
+raw_df = pl.read_csv(SOURCE_URL)
+
+target_column = "Survived"
+raw_df.head()
+
+# %% [markdown]
+# ## Impute missing values with indicators
+#
+# Age, fare, and the port of embarkation contain missing values. `SimpleImputer` fills them with
+# a sensible default and optionally appends binary indicators so downstream models can learn
+# whether a value was originally missing.
+
+# %%
+imputer = SimpleImputer(
+    numeric_strategy_map={"Age": "median", "Fare": "median"},
+    categorical_strategy_map={"Embarked": "most_frequent"},
+    add_indicator=True,
+)
+df_imputed = imputer.fit_transform(raw_df)
+df_imputed.select(["Age", "Fare", "Embarked", "Age__missing", "Embarked__missing"]).head()
+
+# %% [markdown]
+# ## Encode high-signal categoricals
+#
+# - `OneHotEncoder` expands low-cardinality categoricals (`Sex`, `Embarked`).
+# - `MeanEncoder` target-encodes `Pclass`, smoothing toward the global survival rate so we can
+#   preserve the ordinal signal while avoiding overfitting.
+
+# %%
+ohe = OneHotEncoder(columns=["Sex", "Embarked"], drop_original=False)
+df_encoded = ohe.fit_transform(df_imputed)
+
+mean_encoder = MeanEncoder(target=target_column, columns=["Pclass"], smoothing=10.0)
+df_mean = mean_encoder.fit_transform(df_encoded)
+df_mean.select([c for c in df_mean.columns if c.startswith("Sex_") or c.startswith("Embarked_") or c == "Pclass__mean" or c == target_column]).head()
+
+# %% [markdown]
+# ## Clip extreme fares
+#
+# Ticket fares span multiple orders of magnitude. Clipping according to the inter-quartile range
+# stabilizes the tail and leaves a flag identifying potential outliers.
+
+# %%
+fare_clipper = ClipOutliers(columns=["Fare"], method="iqr", iqr_factor=1.5, action="clip")
+df_ready = fare_clipper.fit_transform(df_mean)
+
+preview_cols = [
+    "Survived",
+    "Pclass__mean",
+    "Fare",
+    "Fare__is_outlier",
+    "Sex__f",
+    "Sex__m",
+    "Embarked__C",
+    "Embarked__Q",
+    "Embarked__S",
+    "Age",
+    "Age__missing",
+]
+df_ready.select([c for c in preview_cols if c in df_ready.columns]).head()
+
+# %% [markdown]
+# ## Automatically suggested next steps
+#
+# `feataz.suggest_methods` scans the schema and target column to recommend a
+# starting plan for automated feature engineering. You can quickly inspect which
+# columns could benefit from one-hot encoding, target encoders, or outlier
+# handling.
+
+# %%
+suggested_plan = suggest_methods(
+    raw_df,
+    target_column=target_column,
+    include_outliers=True,
+)
+suggested_plan
+
+# %% [markdown]
+# ## AutoFeaturizer baseline pipeline
+#
+# `AutoFeaturizer` can execute those suggestions and produce a modeling table in
+# just a few lines. Customize the options to control ranking, imputation, and
+# whether original columns should be preserved.
+
+# %%
+auto_featurizer = AutoFeaturizer(
+    target_column=target_column,
+    include_outliers=True,
+    add_ranks=True,
+    drop_original=False,
+)
+auto_df = auto_featurizer.fit_transform(raw_df)
+auto_preview_cols = [target_column] + [c for c in auto_df.columns if c != target_column][:9]
+auto_df.select(auto_preview_cols).head()
+
+# %% [markdown]
+# The resulting table contains imputed numerical features, one-hot encoded categoricals, a smoothed
+# target encoding for passenger class, and robust fare values. Save the engineered frame for
+# modeling or join it with engineered family features (e.g., `SibSp`/`Parch` ratios) to explore
+# richer survival signals, and compare against the automated plan generated by `suggest_methods`
+# or the features produced by `AutoFeaturizer`.
