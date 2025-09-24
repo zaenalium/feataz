@@ -13,7 +13,7 @@ def _infer_numeric(df: pl.DataFrame, exclude: Sequence[str] = ()) -> List[str]:
     for n, t in zip(df.columns, df.dtypes):
         if n in exclude_set:
             continue
-        if pl.datatypes.is_numeric(t):
+        if t.is_numeric():
             cols.append(n)
     return cols
 
@@ -24,7 +24,7 @@ def _infer_categorical(df: pl.DataFrame, exclude: Sequence[str] = ()) -> List[st
     for n, t in zip(df.columns, df.dtypes):
         if n in exclude_set:
             continue
-        if pl.datatypes.is_string_dtype(t) or t == pl.Categorical:
+        if t == pl.String or t == pl.Categorical:
             cols.append(n)
     return cols
 
@@ -153,9 +153,9 @@ class TimeSnapshotAggregator(Transformer):
                 if not exprs:
                     continue
                 if gs:
-                    roll = work.group_by_rolling(index_column=time_col, period=w, by=gs, closed=closed).agg(exprs)
+                    roll = work.rolling(index_column=time_col, period=w, group_by=gs, closed=closed).agg(exprs)
                 else:
-                    roll = work.group_by_rolling(index_column=time_col, period=w, closed=closed).agg(exprs)
+                    roll = work.rolling(index_column=time_col, period=w, closed=closed).agg(exprs)
                 # join back on group keys + time
                 join_keys = gs + [time_col]
                 out = out.join(roll, on=join_keys, how="left")
@@ -246,7 +246,7 @@ class DynamicSnapshotAggregator(Transformer):
     def transform(self, df: pl.DataFrame) -> pl.DataFrame:
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
-        out = df.with_row_count("__row__")
+        out = df.with_row_index("__row__")
         time_col = self.time_column
         for gs in self.groupby_sets_:
             exprs: List[pl.Expr] = []
@@ -262,7 +262,7 @@ class DynamicSnapshotAggregator(Transformer):
                 every=self.every,
                 period=self.period,
                 offset=self.offset,
-                by=gs if gs else None,
+                group_by=gs if gs else None,
                 label=self.label,
                 include_boundaries=self.include_boundaries,
             ).agg(exprs)
@@ -317,7 +317,7 @@ class ToDateSnapshotAggregator(Transformer):
         if self.value_columns is None:
             self.value_columns_ = [
                 c for c in df.columns
-                if c not in ([self.time_column] + (self.groupby or [])) and pl.datatypes.is_numeric(df.get_column(c).dtype)
+                if c not in ([self.time_column] + (self.groupby or [])) and df.get_column(c).dtype.is_numeric()
             ]
         else:
             self.value_columns_ = list(self.value_columns)
@@ -332,7 +332,7 @@ class ToDateSnapshotAggregator(Transformer):
     def transform(self, df: pl.DataFrame) -> pl.DataFrame:
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
-        out = df.with_row_count("__row__")
+        out = df.with_row_index("__row__")
         time_col = self.time_column
         keys = (self.groupby or [])
         # compute period start per row
@@ -410,7 +410,7 @@ class EWMAggregator(Transformer):
         if self.time_column not in df.columns:
             raise ValueError(f"time column '{self.time_column}' not found")
         if self.value_columns is None:
-            self.value_columns_ = [c for c in df.columns if c not in ([self.time_column] + (self.groupby or [])) and pl.datatypes.is_numeric(df.get_column(c).dtype)]
+            self.value_columns_ = [c for c in df.columns if c not in ([self.time_column] + (self.groupby or [])) and df.get_column(c).dtype.is_numeric()]
         else:
             self.value_columns_ = list(self.value_columns)
         self.feature_names_in_ = [self.time_column] + (self.groupby or []) + self.value_columns_

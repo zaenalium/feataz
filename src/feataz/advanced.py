@@ -90,12 +90,12 @@ class CrossFitTransformer(Transformer):
                 raise ValueError("Base transformer did not produce new columns")
             oof_cols_added = new_cols
             # attach fold predictions back in order
-            enc_valid = enc_valid.with_row_count("__row__")
-            valid = valid.with_row_count("__row__")
+            enc_valid = enc_valid.with_row_index("__row__")
+            valid = valid.with_row_index("__row__")
             merged = valid.select(["__row__"]).join(enc_valid.select(["__row__"] + new_cols), on="__row__", how="left").drop("__row__")
             # Fill into oof for rows of this fold
-            oof = oof.with_row_count("__row__")
-            oof = oof.join(merged.with_row_count("__row__"), on="__row__", how="left", suffix=f"__f{k}")
+            oof = oof.with_row_index("__row__")
+            oof = oof.join(merged.with_row_index("__row__"), on="__row__", how="left", suffix=f"__f{k}")
             oof = oof.drop("__row__")
         # consolidate oof columns (if duplicates from multiple folds due to suffix)
         # Use first non-null across fold columns for each feature

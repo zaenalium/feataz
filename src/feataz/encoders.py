@@ -16,7 +16,7 @@ def _infer_categorical_columns(df: pl.DataFrame, columns: Optional[Sequence[str]
         return list(columns)
     cats: List[str] = []
     for name, dtype in zip(df.columns, df.dtypes):
-        if pl.datatypes.is_string_dtype(dtype) or dtype == pl.Categorical:
+        if dtype == pl.String or dtype == pl.Categorical:
             cats.append(name)
     return cats
 

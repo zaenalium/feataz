@@ -56,6 +56,12 @@ from .scale import (
     RobustScaler,
     QuantileRankTransformer,
 )
+from .selection import (
+    VarianceThresholdSelector,
+    MutualInformationSelector,
+    ModelBasedImportanceSelector,
+    MRMRSelector,
+)
 from .diagnostics import (
     information_value,
     ks_statistic,
@@ -123,6 +129,11 @@ __all__ = [
     # Scaling & ranks
     "RobustScaler",
     "QuantileRankTransformer",
+    # Selection
+    "VarianceThresholdSelector",
+    "MutualInformationSelector",
+    "ModelBasedImportanceSelector",
+    "MRMRSelector",
     # Diagnostics
     "information_value",
     "ks_statistic",

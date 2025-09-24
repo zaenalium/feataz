@@ -12,7 +12,7 @@ def _infer_numeric(df: pl.DataFrame, columns: Optional[Sequence[str]]) -> List[s
         return list(columns)
     cols: List[str] = []
     for n, t in zip(df.columns, df.dtypes):
-        if pl.datatypes.is_numeric(t):
+        if t.is_numeric():
             cols.append(n)
     return cols
 
@@ -96,13 +96,17 @@ class QuantileRankTransformer(Transformer):
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
         out = df
-        over = self.groupby
+        has_groups = bool(self.groupby)
+        group_keys = self.groupby if has_groups else None
         # Use rank pct via expressions
         for c in self.cols_:
-            # rank method selection limited; using average
-            expr = (pl.col(c).rank(method="average").over(over) / pl.count().over(over)).alias(f"{c}{self.suffix}")
+            rank_expr = pl.col(c).rank(method=self.method)
+            denom_expr = pl.len()
+            if has_groups and group_keys is not None:
+                rank_expr = rank_expr.over(group_keys)
+                denom_expr = denom_expr.over(group_keys)
+            expr = (rank_expr / denom_expr).alias(f"{c}{self.suffix}")
             out = out.with_columns(expr)
             if self.drop_original:
                 out = out.drop(c)
         return out
-

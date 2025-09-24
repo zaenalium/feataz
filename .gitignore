@@ -4,3 +4,6 @@ __pycache__
 *.pyc
 src/*.egg-info
 notebook/.ipynb_checkpoints
+debug_logs
+debug_report.md
+*/*/.ipynb_checkpoints

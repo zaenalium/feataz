@@ -10,7 +10,7 @@ from .base import Transformer, _ensure_polars_df
 def _infer_numeric(df: pl.DataFrame) -> List[str]:
     cols: List[str] = []
     for n, t in zip(df.columns, df.dtypes):
-        if pl.datatypes.is_numeric(t):
+        if t.is_numeric():
             cols.append(n)
     return cols
 
@@ -18,7 +18,7 @@ def _infer_numeric(df: pl.DataFrame) -> List[str]:
 def _infer_categorical(df: pl.DataFrame) -> List[str]:
     cols: List[str] = []
     for n, t in zip(df.columns, df.dtypes):
-        if pl.datatypes.is_string_dtype(t) or t == pl.Categorical:
+        if t == pl.String or t == pl.Categorical:
             cols.append(n)
     return cols
 

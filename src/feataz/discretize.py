@@ -13,7 +13,7 @@ def _infer_numeric_columns(df: pl.DataFrame, columns: Optional[Sequence[str]]) -
         return list(columns)
     nums: List[str] = []
     for name, dtype in zip(df.columns, df.dtypes):
-        if pl.datatypes.is_numeric(dtype):
+        if dtype.is_numeric():
             nums.append(name)
     return nums
 

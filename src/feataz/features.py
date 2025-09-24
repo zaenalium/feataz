@@ -11,7 +11,7 @@ from .base import Transformer, _ensure_polars_df
 def _infer_numeric(df: pl.DataFrame, include_bool: bool = True) -> List[str]:
     cols: List[str] = []
     for n, t in zip(df.columns, df.dtypes):
-        if pl.datatypes.is_numeric(t):
+        if t.is_numeric():
             if not include_bool and t == pl.Boolean:
                 continue
             cols.append(n)
@@ -21,7 +21,7 @@ def _infer_numeric(df: pl.DataFrame, include_bool: bool = True) -> List[str]:
 def _infer_categorical(df: pl.DataFrame) -> List[str]:
     cols: List[str] = []
     for n, t in zip(df.columns, df.dtypes):
-        if pl.datatypes.is_string_dtype(t) or t == pl.Categorical:
+        if t == pl.String or t == pl.Categorical:
             cols.append(n)
     return cols
 
@@ -283,7 +283,7 @@ class DecisionTreeFeatures(Transformer):
 
     def _encode_column(self, s: pl.Series, name: str) -> pl.Series:
         # Ordinal-encode string-like columns for sklearn
-        if pl.datatypes.is_string_dtype(s.dtype) or s.dtype == pl.Categorical:
+        if s.dtype == pl.String or s.dtype == pl.Categorical:
             mapping = self.ordinal_maps_.get(name)
             if mapping is None:
                 cats = s.drop_nulls().cast(pl.Utf8).unique().to_list()

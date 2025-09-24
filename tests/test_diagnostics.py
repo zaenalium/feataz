@@ -29,14 +29,13 @@ def _quantile_edges(series: pl.Series, segments: int) -> list[float]:
     probs = [i / segments for i in range(1, segments)]
     numeric = series.cast(pl.Float64)
     quantiles = [numeric.quantile(q) for q in probs]
-    edges = [-float("inf")]
+    edges: list[float] = []
     for value in quantiles:
         if value is None:
             continue
         val = float(value)
         if not edges or val > edges[-1]:
             edges.append(val)
-    edges.append(float("inf"))
     return edges
 
 
@@ -114,11 +113,14 @@ def test_population_stability_index_wine(wine_df: pl.DataFrame) -> None:
     n_e = float(len(expected_series))
     n_a = float(len(actual_series))
 
-    manual = e_dist.join(a_dist, on="b", how="outer", suffix="_a").fill_null(0).with_columns([
+    manual = e_dist.join(a_dist, on="b", how="full", suffix="_a").fill_null(0)
+    manual = manual.with_columns([
         (pl.col("len") / (n_e + EPS)).alias("p_e"),
         (pl.col("len_a") / (n_a + EPS)).alias("p_a"),
-        ((pl.col("p_e") - pl.col("p_a")) * ((pl.col("p_e") + EPS) / (pl.col("p_a") + EPS)).log()).alias("psi_part"),
     ])
+    manual = manual.with_columns(
+        ((pl.col("p_e") - pl.col("p_a")) * ((pl.col("p_e") + EPS) / (pl.col("p_a") + EPS)).log()).alias("psi_part")
+    )
     expected_psi = float(manual.get_column("psi_part").sum())
 
     assert result_psi == pytest.approx(expected_psi, rel=1e-9, abs=1e-9)

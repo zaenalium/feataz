@@ -1,10 +1,28 @@
 from __future__ import annotations
 
+import math
 from typing import Iterable, List, Optional, Sequence, Tuple
 
 import polars as pl
 
 from .base import _ensure_polars_df, _ensure_polars_series
+
+
+def _prepare_cut_bins(bins: Sequence[float]) -> List[float]:
+    """Return strictly increasing finite breakpoints compatible with polars.cut."""
+
+    finite: List[float] = []
+    for value in bins:
+        try:
+            val = float(value)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(val):
+            continue
+        finite.append(val)
+    if not finite:
+        return []
+    return sorted(set(finite))
 
 
 def information_value(
@@ -24,8 +42,9 @@ def information_value(
         raise ValueError("feature/target not found")
     s = df.get_column(feature)
     x = s
-    if bins is not None and pl.datatypes.is_numeric(s.dtype):
-        x = s.cast(pl.Float64).cut(bins, labels=list(range(len(bins) - 1)))
+    if bins is not None and s.dtype.is_numeric():
+        cut_bins = _prepare_cut_bins(bins)
+        x = s.cast(pl.Float64).cut(cut_bins)
     temp = df.select([x.alias("feat"), pl.col(target).alias("target")])
     agg = (
         temp.group_by("feat")
@@ -91,19 +110,22 @@ def psi(
     if bins is None:
         qs = [i / n_bins for i in range(1, n_bins)]
         quantiles = pl.DataFrame({"q": [expected.quantile(q) for q in qs]}).get_column("q").to_list()
-        edges = [-float("inf")] + [float(q) for q in quantiles] + [float("inf")]
+        edges = [float(q) for q in quantiles if q is not None]
     else:
         edges = list(bins)
-    e_bin = expected.cast(pl.Float64).cut(edges)
-    a_bin = actual.cast(pl.Float64).cut(edges)
+    cut_edges = _prepare_cut_bins(edges)
+    e_bin = expected.cast(pl.Float64).cut(cut_edges)
+    a_bin = actual.cast(pl.Float64).cut(cut_edges)
     e_dist = pl.DataFrame({"b": e_bin}).group_by("b").len()
     a_dist = pl.DataFrame({"b": a_bin}).group_by("b").len()
     n_e = float(len(expected))
     n_a = float(len(actual))
-    joined = e_dist.join(a_dist, on="b", how="outer", suffix="_a").fill_null(0)
+    joined = e_dist.join(a_dist, on="b", how="full", suffix="_a").fill_null(0)
     joined = joined.with_columns([
         (pl.col("len") / (n_e + eps)).alias("p_e"),
         (pl.col("len_a") / (n_a + eps)).alias("p_a"),
-        ((pl.col("p_e") - pl.col("p_a")) * ((pl.col("p_e") + eps) / (pl.col("p_a") + eps)).log()).alias("psi_part"),
     ])
+    joined = joined.with_columns(
+        ((pl.col("p_e") - pl.col("p_a")) * ((pl.col("p_e") + eps) / (pl.col("p_a") + eps)).log()).alias("psi_part")
+    )
     return float(joined.get_column("psi_part").sum())

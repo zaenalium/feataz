@@ -40,6 +40,7 @@ from feataz import (
     SimpleImputer, GroupImputer, KNNImputer, IterativeImputer, TimeSeriesImputer,
     ClipOutliers, IsolationForestOutlierHandler,
     RobustScaler, QuantileRankTransformer,
+    VarianceThresholdSelector, MutualInformationSelector, ModelBasedImportanceSelector, MRMRSelector,
     HashEncoder, BinaryEncoder, LeaveOneOutEncoder,
     KMeansDiscretizer, MDLPDiscretizer, ChiMergeDiscretizer, IsotonicBinningDiscretizer, MonotonicOptimalBinningDiscretizer,
     information_value, ks_statistic, psi,

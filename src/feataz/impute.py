@@ -13,7 +13,7 @@ def _infer_numeric(df: pl.DataFrame, exclude: Sequence[str] = ()) -> List[str]:
     for n, t in zip(df.columns, df.dtypes):
         if n in ex:
             continue
-        if pl.datatypes.is_numeric(t):
+        if t.is_numeric():
             cols.append(n)
     return cols
 
@@ -24,7 +24,7 @@ def _infer_categorical(df: pl.DataFrame, exclude: Sequence[str] = ()) -> List[st
     for n, t in zip(df.columns, df.dtypes):
         if n in ex:
             continue
-        if pl.datatypes.is_string_dtype(t) or t == pl.Categorical:
+        if t == pl.String or t == pl.Categorical:
             cols.append(n)
     return cols
 
@@ -73,7 +73,7 @@ class SimpleImputer(Transformer):
         for c in cols:
             dt = df.get_column(c).dtype
             s = df.get_column(c)
-            if pl.datatypes.is_numeric(dt):
+            if dt.is_numeric():
                 strategy = self.numeric_strategy_map.get(c, self.numerical_strategy)
                 if strategy == "mean":
                     self.values_[c] = float(s.mean())
@@ -86,7 +86,7 @@ class SimpleImputer(Transformer):
                     self.values_[c] = val
                 else:
                     raise ValueError("Unsupported numerical_strategy")
-            elif pl.datatypes.is_string_dtype(dt) or dt == pl.Categorical:
+            elif dt == pl.String or dt == pl.Categorical:
                 strategy = self.categorical_strategy_map.get(c, self.categorical_strategy)
                 if strategy == "most_frequent":
                     mode_vals = s.drop_nulls().mode().to_list()
@@ -165,7 +165,7 @@ class GroupImputer(Transformer):
         exprs: List[pl.Expr] = []
         for c in cols:
             dt = df.get_column(c).dtype
-            if pl.datatypes.is_numeric(dt):
+            if dt.is_numeric():
                 strategy = self.numeric_strategy_map.get(c, self.numeric_strategy)
                 if strategy == "mean":
                     exprs.append(pl.col(c).mean().alias(f"{c}{self.suffix}_val"))
@@ -173,7 +173,7 @@ class GroupImputer(Transformer):
                     exprs.append(pl.col(c).median().alias(f"{c}{self.suffix}_val"))
                 else:
                     raise ValueError("Unsupported numeric_strategy")
-            elif pl.datatypes.is_string_dtype(dt) or dt == pl.Categorical:
+            elif dt == pl.String or dt == pl.Categorical:
                 strategy = self.categorical_strategy_map.get(c, self.categorical_strategy)
                 if strategy == "most_frequent":
                     exprs.append(pl.col(c).mode().arr.first().alias(f"{c}{self.suffix}_val"))
@@ -361,7 +361,7 @@ class TimeSeriesImputer(Transformer):
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
         # preserve row order
-        out = df.with_row_count("__row__")
+        out = df.with_row_index("__row__")
         sort_keys = (self.groupby or []) + [self.time_column]
         work = out.sort(sort_keys)
         exprs: List[pl.Expr] = []

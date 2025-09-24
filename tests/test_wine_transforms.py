@@ -271,7 +271,7 @@ def test_snapshot_aggregators_wine(wine_with_time: pl.DataFrame) -> None:
 
 
 def test_imputers_and_scalers_wine(wine_df: pl.DataFrame) -> None:
-    base = wine_df.with_row_count("row_idx").select(
+    base = wine_df.with_row_index("row_idx").select(
         ["target_str", "alcohol", "color_intensity", "row_idx"]
     )
     df = base.with_columns(
