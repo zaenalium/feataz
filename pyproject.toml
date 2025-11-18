@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "feataz"
+description = "Feature engineering utilities built on Polars DataFrames"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {file = "LICENSE"}
+authors = [
+    {name = "Zaenal"}
+]
+dynamic = ["version"]
+dependencies = [
+    "polars",
+    "numpy>=1.23",
+    "pyarrow>=12",
+]
+keywords = [
+    "feature-engineering",
+    "polars",
+    "machine-learning",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries",
+]
+
+[project.optional-dependencies]
+sklearn = ["scikit-learn>=1.1"]
+accelerated = ["numpy>=1.21", "rapidfuzz>=3.0"]
+dev = [
+    "pytest>=8",
+    "polars>=0.19,<0.21",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "feataz.__version__"}

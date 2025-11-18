@@ -1,0 +1,232 @@
+# ---
+# jupyter:
+#   jupytext:
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.17.3
+#   kernelspec:
+#     display_name: Python 3 (ipykernel)
+#     language: python
+#     name: python3
+# ---
+
+# %% [markdown]
+# # Feature Engineering on the Titanic Survival Dataset
+#
+# The Titanic survival data is a classic binary classification task that mixes categorical and
+# numerical signals. We'll combine a few `feataz` transformers to create a modeling table that is
+# ready for a gradient boosting or tree-based learner.
+#
+# - **Source**: [datasciencedojo/datasets](https://github.com/datasciencedojo/datasets/blob/master/titanic.csv)
+# - **Task**: Predict whether a passenger survived (`Survived`)
+# - **Features**: Ticket class, sex, age, fare, family counts, port of embarkation
+#
+# We'll use `polars` for data loading and `feataz` for automated feature preparation.
+
+# %% [markdown]
+# ## Setup
+
+# %%
+import polars as pl
+from feataz import (
+    AutoFeaturizer,
+    ClipOutliers,
+    MeanEncoder,
+    OneHotEncoder,
+    SimpleImputer,
+    suggest_methods,
+)
+
+pl.Config.set_tbl_rows(10)
+pl.Config.set_tbl_cols(12)
+
+# %% [markdown]
+# ## Load the dataset
+#
+# The CSV file is hosted on GitHub. `polars` can stream the file directly over HTTP.
+
+# %%
+SOURCE_URL = "https://raw.githubusercontent.com/datasciencedojo/datasets/master/titanic.csv"
+raw_df = pl.read_csv(SOURCE_URL)
+
+target_column = "Survived"
+raw_df.head()
+
+# %%
+raw_df.get_column('Pclass').dtype.is_numeric()
+
+# %% [markdown]
+# ## Impute missing values with indicators
+#
+# Age, fare, and the port of embarkation contain missing values. `SimpleImputer` fills them with
+# a sensible default and optionally appends binary indicators so downstream models can learn
+# whether a value was originally missing.
+
+# %%
+imputer = SimpleImputer(
+    columns = ["Age", "Fare",  "Embarked"],
+    numeric_strategy_map={"Age": "median", "Fare": "median"},
+    categorical_strategy_map={"Embarked": "most_frequent"},
+    add_indicator=False,
+)
+df_imputed = imputer.fit_transform(raw_df)
+df_imputed
+
+# %% [markdown]
+# ## Encode high-signal categoricals
+#
+# - `OneHotEncoder` expands low-cardinality categoricals (`Sex`, `Embarked`).
+# - `MeanEncoder` target-encodes `Pclass`, smoothing toward the global survival rate so we can
+#   preserve the ordinal signal while avoiding overfitting.
+
+# %%
+ohe = OneHotEncoder(columns=["Sex", "Embarked"], drop_original=False)
+df_encoded = ohe.fit_transform(df_imputed)
+
+mean_encoder = MeanEncoder(target=target_column, columns=["Pclass"], smoothing=10.0)
+df_mean = mean_encoder.fit_transform(df_encoded)
+df_mean.select([c for c in df_mean.columns if c.startswith("Sex_") or c.startswith("Embarked_") or c == "Pclass__mean" or c == target_column]).head()
+
+# %% [markdown]
+# ## Clip extreme fares
+#
+# Ticket fares span multiple orders of magnitude. Clipping according to the inter-quartile range
+# stabilizes the tail and leaves a flag identifying potential outliers.
+
+# %%
+fare_clipper = ClipOutliers(columns=["Fare"], method="iqr", iqr_factor=1.5, action="clip")
+df_ready = fare_clipper.fit_transform(df_mean)
+
+preview_cols = [
+    "Survived",
+    "Pclass__mean",
+    "Fare",
+    "Fare__is_outlier",
+    "Sex__f",
+    "Sex__m",
+    "Embarked__C",
+    "Embarked__Q",
+    "Embarked__S",
+    "Age",
+    "Age__missing",
+]
+df_ready.select([c for c in preview_cols if c in df_ready.columns]).head()
+
+# %% [markdown]
+# ## Automatically suggested next steps
+#
+# `feataz.suggest_methods` scans the schema and target column to recommend a
+# starting plan for automated feature engineering. You can quickly inspect which
+# columns could benefit from one-hot encoding, target encoders, or outlier
+# handling.
+
+# %%
+suggested_plan = suggest_methods(
+    raw_df,
+    target_column=target_column,
+    include_outliers=True,
+)
+suggested_plan
+
+# %% [markdown]
+# ## AutoFeaturizer baseline pipeline
+#
+# `AutoFeaturizer` can execute those suggestions and produce a modeling table in
+# just a few lines. Customize the options to control ranking, imputation, and
+# whether original columns should be preserved.
+
+# %%
+auto_featurizer = AutoFeaturizer(
+    target_column=target_column,
+    include_outliers=True,
+    add_ranks=True,
+    drop_original=False,
+)
+auto_df = auto_featurizer.fit_transform(raw_df)
+auto_preview_cols = [target_column] + [c for c in auto_df.columns if c != target_column][:9]
+auto_df.select(auto_preview_cols).head()
+
+# %%
+auto_df
+
+# %%
+auto_df.columns
+
+# %% [markdown]
+# The resulting table contains imputed numerical features, one-hot encoded categoricals, a smoothed
+# target encoding for passenger class, and robust fare values. Save the engineered frame for
+# modeling or join it with engineered family features (e.g., `SibSp`/`Parch` ratios) to explore
+# richer survival signals, and compare against the automated plan generated by `suggest_methods`
+# or the features produced by `AutoFeaturizer`.
+
+# %%
+import sklearn.datasets as sklearn_datasets
+loader = sklearn_datasets.load_wine()
+data = {name: loader.data[:, idx].astype(float) for idx, name in enumerate(loader.feature_names)}
+data["target"] = loader.target.astype(int)
+df = pl.DataFrame(data)
+
+# %%
+wine_binary = df.with_columns(
+        (pl.col("target") == 0).cast(pl.Int64).alias("target_bin")
+    )
+
+# %%
+EPS = 1e-6
+def _quantile_edges(series: pl.Series, segments: int) -> list[float]:
+    probs = [i / segments for i in range(1, segments)]
+    numeric = series.cast(pl.Float64)
+    quantiles = [numeric.quantile(q) for q in probs]
+    edges = [-float("inf")]
+    for value in quantiles:
+        if value is None:
+            continue
+        val = float(value)
+        if not edges or val > edges[-1]:
+            edges.append(val)
+    edges.append(float("inf"))
+    return edges
+
+
+# %%
+feature = "alcohol"
+feature_series = wine_binary.get_column(feature).cast(pl.Float64)
+edges = _quantile_edges(feature_series, 4)
+
+manual = (
+    wine_binary.with_columns(pl.col(feature).cut(edges).alias("bin"))
+    .group_by("bin")
+    .agg([
+        (pl.col("target_bin") == 1).sum().alias("pos"),
+        (pl.col("target_bin") == 0).sum().alias("neg"),
+    ])
+    .with_columns([
+        (pl.col("pos") / (pl.sum("pos") + EPS)).alias("dist_pos"),
+        (pl.col("neg") / (pl.sum("neg") + EPS)).alias("dist_neg"),
+    ])
+    .with_columns(
+        (
+            (pl.col("dist_pos") - pl.col("dist_neg"))
+            * ((pl.col("dist_pos") + EPS) / (pl.col("dist_neg") + EPS)).log()
+        ).alias("iv_part")
+    )
+)
+expected_iv = float(manual.get_column("iv_part").sum())
+result_iv = information_value(wine_binary, feature, "target_bin", bins=edges, eps=EPS)
+
+# %%
+from feataz.diagnostics import information_value
+
+# %%
+information_value(wine_binary, feature, "target_bin")
+
+# %%
+s.cast(pl.Float64).cut(bins, labels=list(range(len(bins) - 1)))
+
+
+# %%
+list(range(len(edges) - 1))
+
+# %%

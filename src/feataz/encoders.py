@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+
+import numpy as np
 
 import polars as pl
 
@@ -13,7 +16,7 @@ def _infer_categorical_columns(df: pl.DataFrame, columns: Optional[Sequence[str]
         return list(columns)
     cats: List[str] = []
     for name, dtype in zip(df.columns, df.dtypes):
-        if pl.datatypes.is_string_dtype(dtype) or dtype == pl.Categorical:
+        if dtype == pl.String or dtype == pl.Categorical:
             cats.append(name)
     return cats
 
@@ -107,6 +110,7 @@ class OrdinalEncoder(Transformer):
     def transform(self, df: pl.DataFrame) -> pl.DataFrame:
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
+        df = _ensure_polars_df(df)
         out = df
         for col in self.feature_names_in_ or []:
             mapping = self.mappings_[col]
@@ -234,43 +238,136 @@ class WeightOfEvidenceEncoder(Transformer):
         eps: float = 0.5,
         drop_original: bool = True,
         suffix: str = "__woe",
+        multi_class: str = "auto",  # 'binary' | 'ovr' | 'auto'
+        positive_label: Optional[object] = None,
     ) -> None:
         self.target = target
         self.columns = None if columns is None else list(columns)
         self.eps = float(eps)
         self.drop_original = drop_original
         self.suffix = suffix
+        self.multi_class = multi_class
+        self.positive_label = positive_label
         self.encodings_: Dict[str, pl.DataFrame] = {}
+        self.defaults_: Dict[str, Dict[str, float]] = {}
+        self.positive_label_: Optional[object] = None
+        self.negative_label_: Optional[object] = None
 
     def fit(self, df: pl.DataFrame) -> "WeightOfEvidenceEncoder":
         df = _ensure_polars_df(df)
         if self.target not in df.columns:
             raise ValueError(f"target column '{self.target}' not found")
-        # basic check for binary target
+        # check target classes
         unique_vals = df.get_column(self.target).drop_nulls().unique().to_list()
-        if len(unique_vals) > 2:
-            raise ValueError("WeightOfEvidenceEncoder requires a binary target")
+        n_classes = len(unique_vals)
+        if n_classes == 0:
+            raise ValueError("target column must contain at least one class value")
+        mode = self.multi_class
+        if mode == "auto":
+            mode = "binary" if n_classes <= 2 else "ovr"
+        if mode not in {"binary", "ovr"}:
+            raise ValueError("multi_class must be 'binary' or 'ovr'")
         cols = _infer_categorical_columns(df, self.columns)
         self.feature_names_in_ = cols
-        total_pos = df.filter(pl.col(self.target) == 1).height
-        total_neg = df.filter(pl.col(self.target) == 0).height
         eps = self.eps
         self.encodings_.clear()
-        for col in cols:
-            agg = (
-                df.group_by(col)
-                .agg([
-                    (pl.col(self.target) == 1).sum().alias("pos"),
-                    (pl.col(self.target) == 0).sum().alias("neg"),
-                ])
-                .with_columns([
-                    (pl.col("pos") + eps) / (pl.lit(float(total_pos)) + eps * 2).alias("p_pos"),
-                    (pl.col("neg") + eps) / (pl.lit(float(total_neg)) + eps * 2).alias("p_neg"),
-                ])
-                .with_columns((pl.col("p_pos") / pl.col("p_neg")).log().alias(f"{col}{self.suffix}"))
-                .select([col, f"{col}{self.suffix}"])
+        self.defaults_.clear()
+        self.positive_label_ = None
+        self.negative_label_ = None
+        if mode == "binary":
+            if n_classes < 2:
+                raise ValueError("binary WoE encoding requires exactly two target classes")
+            if self.positive_label is not None:
+                pos_label = self.positive_label
+                if pos_label not in unique_vals:
+                    raise ValueError("positive_label not found in target column")
+                neg_candidates = [val for val in unique_vals if val != pos_label]
+                if len(neg_candidates) != 1:
+                    raise ValueError(
+                        "binary WoE encoding requires exactly two target classes when positive_label is provided"
+                    )
+                neg_label = neg_candidates[0]
+            else:
+                if n_classes != 2:
+                    raise ValueError("binary WoE encoding requires exactly two target classes")
+                sorted_vals = sorted(unique_vals)
+                neg_label, pos_label = sorted_vals[0], sorted_vals[-1]
+            self.positive_label_ = pos_label
+            self.negative_label_ = neg_label
+            total_counts = df.select(
+                [
+                    (pl.col(self.target) == pl.lit(pos_label)).sum().alias("pos"),
+                    (pl.col(self.target) == pl.lit(neg_label)).sum().alias("neg"),
+                ]
             )
-            self.encodings_[col] = agg
+            total_pos, total_neg = total_counts.row(0)
+            total_pos = float(total_pos)
+            total_neg = float(total_neg)
+        else:
+            classes = sorted(df.get_column(self.target).drop_nulls().unique().to_list())
+            totals = {}
+            for c in classes:
+                totals[c] = (
+                    df.select([
+                        (pl.col(self.target) == pl.lit(c)).sum().alias("pos"),
+                        (pl.col(self.target) != pl.lit(c)).sum().alias("neg"),
+                    ])
+                    .row(0)
+                )
+        eps = self.eps
+        for col in cols:
+            if mode == "binary":
+                encoded_col = f"{col}{self.suffix}"
+                default_val = math.log(
+                    (eps / (total_pos + eps * 2)) / (eps / (total_neg + eps * 2))
+                )
+                ratio_expr = (
+                    ((pl.col("pos") + eps) / (pl.lit(total_pos) + eps * 2))
+                    / ((pl.col("neg") + eps) / (pl.lit(total_neg) + eps * 2))
+                )
+                agg = (
+                    df.group_by(col)
+                    .agg([
+                        (pl.col(self.target) == pl.lit(pos_label)).sum().alias("pos"),
+                        (pl.col(self.target) == pl.lit(neg_label)).sum().alias("neg"),
+                    ])
+                    .with_columns(ratio_expr.log().alias(encoded_col))
+                    .select([col, encoded_col])
+                )
+                self.encodings_[col] = agg
+                self.defaults_[col] = {encoded_col: default_val}
+            else:
+                # one-vs-rest WoE per class
+                frames: List[pl.DataFrame] = []
+                col_defaults: Dict[str, float] = {}
+                for c in classes:
+                    tot_pos, tot_neg = totals[c]
+                    tot_pos = float(tot_pos)
+                    tot_neg = float(tot_neg)
+                    encoded_col = f"{col}{self.suffix}__{c}"
+                    default_val = math.log(
+                        (eps / (tot_pos + eps * 2)) / (eps / (tot_neg + eps * 2))
+                    )
+                    ratio_expr = (
+                        ((pl.col("pos") + eps) / (pl.lit(tot_pos) + eps * 2))
+                        / ((pl.col("neg") + eps) / (pl.lit(tot_neg) + eps * 2))
+                    )
+                    a = (
+                        df.group_by(col)
+                        .agg([
+                            (pl.col(self.target) == pl.lit(c)).sum().alias("pos"),
+                            (pl.col(self.target) != pl.lit(c)).sum().alias("neg"),
+                        ])
+                        .with_columns(ratio_expr.log().alias(encoded_col))
+                        .select([col, encoded_col])
+                    )
+                    frames.append(a)
+                    col_defaults[encoded_col] = default_val
+                enc = frames[0]
+                for fr in frames[1:]:
+                    enc = enc.join(fr, on=col, how="outer")
+                self.encodings_[col] = enc
+                self.defaults_[col] = col_defaults
         self.is_fitted_ = True
         return self
 
@@ -281,7 +378,12 @@ class WeightOfEvidenceEncoder(Transformer):
         for col in self.feature_names_in_ or []:
             enc = self.encodings_[col]
             out = out.join(enc, on=col, how="left")
-            out = out.with_columns(pl.col(f"{col}{self.suffix}").fill_null(0.0))
+            # fill all new columns with smoothed fallback for unseen categories
+            new_cols = [c for c in enc.columns if c != col]
+            defaults = self.defaults_.get(col, {})
+            for nc in new_cols:
+                fill_value = defaults.get(nc, 0.0)
+                out = out.with_columns(pl.col(nc).fill_null(fill_value))
             if self.drop_original:
                 out = out.drop(col)
         return out
@@ -310,6 +412,8 @@ class DecisionTreeEncoder(Transformer):
         self.trees_: Dict[str, object] = {}
         self.ordinal_maps_: Dict[str, Dict[str, int]] = {}
         self.global_value_: float | None = None
+        self.problem_: Optional[str] = None
+        self.class_prior_map_: Optional[Dict[object, float]] = None
 
     def fit(self, df: pl.DataFrame) -> "DecisionTreeEncoder":
         try:
@@ -324,8 +428,11 @@ class DecisionTreeEncoder(Transformer):
             raise ValueError(f"target column '{self.target}' not found")
         cols = _infer_categorical_columns(df, self.columns)
         self.feature_names_in_ = cols
-        y = df.get_column(self.target).to_numpy()
-        self.global_value_ = float(pl.Series(y).mean())
+        target_series = df.get_column(self.target)
+        non_null = target_series.drop_nulls()
+        y = target_series.to_numpy()
+        self.global_value_ = None
+        self.class_prior_map_ = None
         self.trees_.clear()
         self.ordinal_maps_.clear()
 
@@ -333,11 +440,42 @@ class DecisionTreeEncoder(Transformer):
         problem = self.problem
         if problem == "auto":
             # heuristic: <= 20 unique -> classification
-            n_unique = len(pl.Series(y).drop_nulls().unique())
-            if n_unique <= 20 and pl.Series(y).dtype in (pl.Int64, pl.Int32, pl.UInt32, pl.UInt64, pl.Boolean):
+            n_unique = len(non_null.unique())
+            dtype = target_series.dtype
+            integer_like: List[pl.DataType] = []
+            for name in ["Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16", "UInt32", "UInt64"]:
+                dt = getattr(pl, name, None)
+                if dt is not None:
+                    integer_like.append(dt)
+            string_like: List[pl.DataType] = []
+            for name in ["Utf8", "String", "Categorical"]:
+                dt = getattr(pl, name, None)
+                if dt is not None:
+                    string_like.append(dt)
+            is_object_dtype = str(dtype).lower() == "object"
+            if n_unique <= 20 and (
+                dtype == pl.Boolean
+                or dtype in integer_like
+                or dtype in string_like
+                or is_object_dtype
+            ):
                 problem = "classification"
             else:
                 problem = "regression"
+        self.problem_ = problem
+
+        if problem == "classification":
+            target_values = non_null.to_list()
+            if target_values:
+                values, counts = np.unique(np.array(target_values, dtype=object), return_counts=True)
+                total = counts.sum()
+                priors = {val: (cnt / total) for val, cnt in zip(values, counts)}
+            else:
+                priors = {}
+            self.class_prior_map_ = priors
+        else:
+            mean_val = target_series.mean()
+            self.global_value_ = float(mean_val) if mean_val is not None else 0.0
 
         for col in cols:
             # ordinal map
@@ -348,7 +486,12 @@ class DecisionTreeEncoder(Transformer):
             self.ordinal_maps_[col] = mapping
             X = (
                 df.select(pl.col(col).cast(pl.Utf8))
-                .with_columns(pl.col(col).map_elements(lambda x: mapping.get(x, -1)).alias(col))
+                .with_columns(
+                    pl.col(col)
+                    .map_elements(lambda x: mapping.get(x, -1), return_dtype=pl.Int64)
+                    .fill_null(-1)
+                    .alias(col)
+                )
                 .get_column(col)
                 .to_numpy()
                 .reshape(-1, 1)
@@ -375,28 +518,78 @@ class DecisionTreeEncoder(Transformer):
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
         out = df
-        global_val = float(self.global_value_ if self.global_value_ is not None else 0.0)
+        problem = self.problem_ or self.problem
+        prior_map = self.class_prior_map_ if problem == "classification" else None
+        global_val = 0.0
+        if problem != "classification":
+            global_val = float(self.global_value_ if self.global_value_ is not None else 0.0)
+
         for col in self.feature_names_in_ or []:
             mapping = self.ordinal_maps_[col]
             tree = self.trees_[col]
-            X = (
-                df.select(pl.col(col).cast(pl.Utf8))
-                .with_columns(pl.col(col).map_elements(lambda x: mapping.get(x, -1)).alias(col))
+            encoded_series = (
+                df.select(
+                    pl.col(col)
+                    .cast(pl.Utf8)
+                    .map_elements(lambda x: mapping.get(x, -1), return_dtype=pl.Int64)
+                    .fill_null(-1)
+                    .alias(col)
+                )
                 .get_column(col)
-                .to_numpy()
-                .reshape(-1, 1)
             )
-            # predictions as encoding
-            try:
-                y_hat = tree.predict_proba(X)[:, 1]  # type: ignore[attr-defined]
-            except Exception:
-                y_hat = tree.predict(X)
-            new_col = f"{col}{self.suffix}"
-            out = out.with_columns(pl.Series(name=new_col, values=y_hat))
-            if self.drop_original:
-                out = out.drop(col)
-            # Replace possible nans from unknowns
-            out = out.with_columns(pl.col(new_col).fill_nan(global_val))
+            encoded_np = encoded_series.to_numpy()
+            X = encoded_np.reshape(-1, 1)
+            unknown_mask = encoded_np == -1
+
+            if problem == "classification":
+                proba_method = getattr(tree, "predict_proba", None)
+                if callable(proba_method):
+                    try:
+                        probas = np.asarray(proba_method(X), dtype=float)
+                    except Exception:
+                        probas = None
+                    else:
+                        if probas.ndim == 1:
+                            probas = probas.reshape(-1, 1)
+                        classes = getattr(tree, "classes_", None)
+                        if classes is not None:
+                            class_list = list(classes)
+                            if prior_map:
+                                fallback = np.array([prior_map.get(cls, 0.0) for cls in class_list], dtype=float)
+                            elif len(class_list) > 0:
+                                fallback = np.full(len(class_list), 1.0 / len(class_list), dtype=float)
+                            else:
+                                fallback = np.array([], dtype=float)
+                            if unknown_mask.any() and fallback.size:
+                                probas[unknown_mask, :] = fallback
+                            new_columns = []
+                            for idx, cls in enumerate(class_list):
+                                col_name = f"{col}{self.suffix}__{cls}"
+                                new_columns.append(pl.Series(name=col_name, values=probas[:, idx]))
+                            out = out.with_columns(new_columns)
+                            if self.drop_original:
+                                out = out.drop(col)
+                            continue
+
+            y_hat = tree.predict(X)
+            if problem == "classification":
+                y_hat_arr = np.asarray(y_hat, dtype=object)
+                if unknown_mask.any() and prior_map:
+                    fallback_label = max(prior_map.items(), key=lambda kv: kv[1])[0]
+                    y_hat_arr[unknown_mask] = fallback_label
+                new_col = f"{col}{self.suffix}"
+                out = out.with_columns(pl.Series(name=new_col, values=list(y_hat_arr)))
+                if self.drop_original:
+                    out = out.drop(col)
+            else:
+                y_hat_arr = np.asarray(y_hat, dtype=float)
+                if unknown_mask.any():
+                    y_hat_arr[unknown_mask] = global_val
+                new_col = f"{col}{self.suffix}"
+                out = out.with_columns(pl.Series(name=new_col, values=y_hat_arr))
+                if self.drop_original:
+                    out = out.drop(col)
+                out = out.with_columns(pl.col(new_col).fill_nan(global_val))
         return out
 
 
@@ -462,12 +655,14 @@ class StringSimilarityEncoder(Transformer):
         top_k_anchors: int = 5,
         drop_original: bool = True,
         prefix: str = "__sim__",
+        backend: str = "auto",  # 'auto' | 'difflib' | 'rapidfuzz'
     ) -> None:
         self.columns = None if columns is None else list(columns)
         self.anchors = anchors
         self.top_k_anchors = int(top_k_anchors)
         self.drop_original = drop_original
         self.prefix = prefix
+        self.backend = backend
         self.anchors_: Dict[str, List[str]] = {}
 
     def fit(self, df: pl.DataFrame) -> "StringSimilarityEncoder":
@@ -490,8 +685,6 @@ class StringSimilarityEncoder(Transformer):
         return self
 
     def transform(self, df: pl.DataFrame) -> pl.DataFrame:
-        import difflib
-
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
         out = df
@@ -503,9 +696,23 @@ class StringSimilarityEncoder(Transformer):
             )
             # build similarity dict per anchor
             sim_maps = {a: {} for a in anchors}
-            for u in uniques:
-                for a in anchors:
-                    sim_maps[a][u] = difflib.SequenceMatcher(None, u, a).ratio()
+            backend = self.backend
+            if backend == "auto":
+                try:
+                    import rapidfuzz  # type: ignore
+                    backend = "rapidfuzz"
+                except Exception:
+                    backend = "difflib"
+            if backend == "rapidfuzz":
+                from rapidfuzz import fuzz  # type: ignore
+                for u in uniques:
+                    for a in anchors:
+                        sim_maps[a][u] = float(fuzz.ratio(u, a)) / 100.0
+            else:
+                import difflib
+                for u in uniques:
+                    for a in anchors:
+                        sim_maps[a][u] = difflib.SequenceMatcher(None, u, a).ratio()
             # generate columns via map_elements using the dicts
             for a in anchors:
                 new_col = f"{col}{self.prefix}{a}"
@@ -520,3 +727,150 @@ class StringSimilarityEncoder(Transformer):
                 out = out.drop(col)
         return out
 
+
+class HashEncoder(Transformer):
+    def __init__(
+        self,
+        columns: Optional[Sequence[str]] = None,
+        n_components: int = 8,
+        drop_original: bool = True,
+        suffix: str = "__hash",
+    ) -> None:
+        self.columns = None if columns is None else list(columns)
+        self.n_components = int(n_components)
+        self.drop_original = drop_original
+        self.suffix = suffix
+
+    def fit(self, df: pl.DataFrame) -> "HashEncoder":
+        df = _ensure_polars_df(df)
+        self.feature_names_in_ = _infer_categorical_columns(df, self.columns)
+        self.is_fitted_ = True
+        return self
+
+    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+        import hashlib
+
+        if not self.is_fitted_:
+            raise RuntimeError("Call fit before transform")
+        out = df
+        m = self.n_components
+        for col in self.feature_names_in_ or []:
+            def hfun(x: str, M=m) -> int:
+                if x is None:
+                    return 0
+                return int(hashlib.md5(str(x).encode("utf-8")).hexdigest(), 16) % M
+            new_col = f"{col}{self.suffix}"
+            out = out.with_columns(pl.col(col).cast(pl.Utf8).map_elements(hfun, return_dtype=pl.Int32).alias(new_col))
+            if self.drop_original:
+                out = out.drop(col)
+        return out
+
+
+class BinaryEncoder(Transformer):
+    def __init__(
+        self,
+        columns: Optional[Sequence[str]] = None,
+        drop_original: bool = True,
+        prefix: str = "__bin__",
+    ) -> None:
+        self.columns = None if columns is None else list(columns)
+        self.drop_original = drop_original
+        self.prefix = prefix
+        self.ordinal_maps_: Dict[str, Dict[str, int]] = {}
+        self.n_bits_: Dict[str, int] = {}
+
+    def fit(self, df: pl.DataFrame) -> "BinaryEncoder":
+        df = _ensure_polars_df(df)
+        cols = _infer_categorical_columns(df, self.columns)
+        self.feature_names_in_ = cols
+        self.ordinal_maps_.clear()
+        self.n_bits_.clear()
+        for col in cols:
+            cats = df.get_column(col).drop_nulls().cast(pl.Utf8).unique().to_list()
+            mapping = {c: i + 1 for i, c in enumerate(sorted(cats))}  # reserve 0 for null/unseen
+            self.ordinal_maps_[col] = mapping
+            n = len(mapping) + 1
+            n_bits = max(1, (n - 1).bit_length())
+            self.n_bits_[col] = n_bits
+        self.is_fitted_ = True
+        return self
+
+    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+        if not self.is_fitted_:
+            raise RuntimeError("Call fit before transform")
+        out = df
+        for col in self.feature_names_in_ or []:
+            mapping = self.ordinal_maps_[col]
+            n_bits = self.n_bits_[col]
+            ord_col = f"{col}{self.prefix}ord"
+            out = out.with_columns(
+                pl.col(col)
+                .cast(pl.Utf8)
+                .map_elements(lambda x, m=mapping: m.get(x, 0), return_dtype=pl.Int64)
+                .alias(ord_col)
+            )
+            for b in range(n_bits):
+                shift = 1 << b
+                out = out.with_columns(
+                    ((pl.col(ord_col) // shift) % 2).cast(pl.Int8).alias(f"{col}{self.prefix}{b}")
+                )
+            out = out.drop(ord_col)
+            if self.drop_original:
+                out = out.drop(col)
+        return out
+
+
+class LeaveOneOutEncoder(Transformer):
+    def __init__(
+        self,
+        target: str,
+        columns: Optional[Sequence[str]] = None,
+        smoothing: float = 0.0,
+        drop_original: bool = True,
+        suffix: str = "__loo",
+    ) -> None:
+        self.target = target
+        self.columns = None if columns is None else list(columns)
+        self.smoothing = float(smoothing)
+        self.drop_original = drop_original
+        self.suffix = suffix
+        self.stats_: Dict[str, pl.DataFrame] = {}
+        self.global_mean_: float | None = None
+
+    def fit(self, df: pl.DataFrame) -> "LeaveOneOutEncoder":
+        df = _ensure_polars_df(df)
+        if self.target not in df.columns:
+            raise ValueError(f"target column '{self.target}' not found")
+        cols = _infer_categorical_columns(df, self.columns)
+        self.feature_names_in_ = cols
+        self.global_mean_ = float(df.get_column(self.target).mean())
+        self.stats_.clear()
+        for col in cols:
+            agg = df.group_by(col).agg([
+                pl.len().alias("cnt"),
+                pl.col(self.target).sum().alias("sum_t"),
+            ])
+            self.stats_[col] = agg
+        self.is_fitted_ = True
+        return self
+
+    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+        if not self.is_fitted_:
+            raise RuntimeError("Call fit before transform")
+        out = df
+        global_mean = float(self.global_mean_ if self.global_mean_ is not None else 0.0)
+        for col in self.feature_names_in_ or []:
+            stats = self.stats_[col]
+            out = out.join(stats, on=col, how="left")
+            # (sum - y) / (cnt - 1) with smoothing
+            enc = ((pl.col("sum_t") - pl.col(self.target)) / (pl.col("cnt") - 1)).alias("_tmp_loo")
+            if self.smoothing > 0:
+                m = global_mean
+                enc = (((pl.col("cnt") - 1) * enc + self.smoothing * m) / ((pl.col("cnt") - 1) + self.smoothing)).alias("_tmp_loo")
+            out = out.with_columns(enc)
+            new_col = f"{col}{self.suffix}"
+            out = out.with_columns(pl.when(pl.col("cnt") > 1).then(pl.col("_tmp_loo")).otherwise(global_mean).alias(new_col))
+            out = out.drop(["cnt", "sum_t", "_tmp_loo"])
+            if self.drop_original:
+                out = out.drop(col)
+        return out

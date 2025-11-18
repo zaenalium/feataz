@@ -327,18 +327,37 @@ class BoxCoxTransformer(Transformer):
             lam = self.lambdas_[col]
             offset = self.offsets_[col]
             new_col = f"{col}{self.suffix}"
-            # Use numpy via apply to avoid recomputing per-element lambdas in Python
-            def _apply_boxcox(arr: np.ndarray, lam=lam, off=offset) -> np.ndarray:
-                return _boxcox_transform(arr + off, lam)
+            # Scalar implementation to reduce NumPy overhead per element
+            def _boxcox_scalar(v: float, lam=lam, off=offset) -> float:
+                x = float(v) + float(off)
+                if lam == 0:
+                    return float(np.log(x))
+                return float((np.power(x, lam) - 1.0) / lam)
 
             out = out.with_columns(
-                pl.col(col)
-                .cast(pl.Float64)
-                .map_elements(lambda v: float(_apply_boxcox(np.array([v]))[0]), return_dtype=pl.Float64)
-                .alias(new_col)
+                pl.col(col).cast(pl.Float64).map_elements(_boxcox_scalar, return_dtype=pl.Float64).alias(new_col)
             )
             if self.drop_original:
                 out = out.drop(col)
+        return out
+
+    def inverse_transform(self, df: pl.DataFrame) -> pl.DataFrame:
+        if not self.is_fitted_:
+            raise RuntimeError("Call fit before inverse_transform")
+        out = df
+        for col in self.feature_names_in_ or []:
+            lam = self.lambdas_[col]
+            offset = self.offsets_[col]
+            new_col = col  # inverse to original name
+            def _inv_boxcox(v: float, lam=lam, off=offset) -> float:
+                if lam == 0:
+                    return float(np.exp(v) - off)
+                return float(np.power(lam * v + 1.0, 1.0 / lam) - off)
+            # assuming df contains transformed column name f"{col}{self.suffix}"
+            tname = f"{col}{self.suffix}"
+            if tname not in out.columns:
+                continue
+            out = out.with_columns(pl.col(tname).map_elements(_inv_boxcox, return_dtype=pl.Float64).alias(new_col))
         return out
 
 
@@ -400,12 +419,43 @@ class YeoJohnsonTransformer(Transformer):
         for col in self.feature_names_in_ or []:
             lam = self.lambdas_[col]
             new_col = f"{col}{self.suffix}"
-            def _apply_yj(v: float, lam=lam) -> float:
-                return float(_yeojohnson_transform(np.array([v]), lam)[0])
+            def _yj_scalar(v: float, lam=lam) -> float:
+                x = float(v)
+                if x >= 0:
+                    if lam == 0:
+                        return float(np.log1p(x))
+                    return float((np.power(x + 1.0, lam) - 1.0) / lam)
+                else:
+                    if lam == 2:
+                        return float(-np.log1p(-x))
+                    return float(-((np.power(1.0 - x, 2 - lam) - 1.0) / (2 - lam)))
 
             out = out.with_columns(
-                pl.col(col).cast(pl.Float64).map_elements(_apply_yj, return_dtype=pl.Float64).alias(new_col)
+                pl.col(col).cast(pl.Float64).map_elements(_yj_scalar, return_dtype=pl.Float64).alias(new_col)
             )
             if self.drop_original:
                 out = out.drop(col)
+        return out
+
+    def inverse_transform(self, df: pl.DataFrame) -> pl.DataFrame:
+        if not self.is_fitted_:
+            raise RuntimeError("Call fit before inverse_transform")
+        out = df
+        for col in self.feature_names_in_ or []:
+            lam = self.lambdas_[col]
+            def _inv_yj(v: float, lam=lam) -> float:
+                if v is None:
+                    return np.nan
+                if lam == 0 and v >= 0:
+                    return float(np.expm1(v))
+                if lam == 2 and v < 0:
+                    return float(1 - np.expm1(-v))
+                if v >= 0:
+                    return float(np.power(lam * v + 1.0, 1.0 / lam) - 1.0)
+                else:
+                    return float(1.0 - np.power(1.0 - (2 - lam) * v, 1.0 / (2 - lam)))
+            tname = f"{col}{self.suffix}"
+            if tname not in out.columns:
+                continue
+            out = out.with_columns(pl.col(tname).map_elements(_inv_yj, return_dtype=pl.Float64).alias(col))
         return out
