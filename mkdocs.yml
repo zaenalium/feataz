@@ -1,0 +1,18 @@
+site_name: feataz
+site_description: Lightweight feature engineering utilities for Polars DataFrames
+site_author: feataz maintainers
+repo_url: https://github.com/zaenalium/feataz
+repo_name: zaenalium/feataz
+theme:
+  name: mkdocs
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Reference:
+      - Transformer catalog: reference/index.md
+  - Examples & Tutorials: examples.md
+markdown_extensions:
+  - admonition
+  - codehilite
+  - toc:
+      permalink: true
