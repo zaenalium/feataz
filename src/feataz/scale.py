@@ -4,14 +4,21 @@ from typing import Dict, List, Optional, Sequence
 
 import polars as pl
 
-from .base import Transformer, _ensure_polars_df
+from .base import (
+    Transformer,
+    _ensure_polars_df,
+    _ensure_eager,
+    _get_column_names,
+    _get_column_dtypes,
+    DataFrameOrLazy,
+)
 
 
-def _infer_numeric(df: pl.DataFrame, columns: Optional[Sequence[str]]) -> List[str]:
+def _infer_numeric(df: DataFrameOrLazy, columns: Optional[Sequence[str]]) -> List[str]:
     if columns is not None:
         return list(columns)
     cols: List[str] = []
-    for n, t in zip(df.columns, df.dtypes):
+    for n, t in zip(_get_column_names(df), _get_column_dtypes(df)):
         if t.is_numeric():
             cols.append(n)
     return cols
@@ -50,7 +57,7 @@ class RobustScaler(Transformer):
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> DataFrameOrLazy:
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
         out = df
@@ -92,7 +99,7 @@ class QuantileRankTransformer(Transformer):
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> DataFrameOrLazy:
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
         out = df

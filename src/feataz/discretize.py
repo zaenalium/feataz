@@ -5,14 +5,21 @@ from typing import Dict, List, Optional, Sequence
 import math
 import polars as pl
 
-from .base import Transformer, _ensure_polars_df
+from .base import (
+    Transformer,
+    _ensure_polars_df,
+    _ensure_eager,
+    _get_column_names,
+    _get_column_dtypes,
+    DataFrameOrLazy,
+)
 
 
-def _infer_numeric_columns(df: pl.DataFrame, columns: Optional[Sequence[str]]) -> List[str]:
+def _infer_numeric_columns(df: DataFrameOrLazy, columns: Optional[Sequence[str]]) -> List[str]:
     if columns is not None:
         return list(columns)
     nums: List[str] = []
-    for name, dtype in zip(df.columns, df.dtypes):
+    for name, dtype in zip(_get_column_names(df), _get_column_dtypes(df)):
         if dtype.is_numeric():
             nums.append(name)
     return nums
@@ -49,6 +56,29 @@ def _cut_to_bins(column: str, edges: Sequence[float], alias: str, labels_as_int:
 
 
 class EqualFrequencyDiscretizer(Transformer):
+    """Discretize numeric columns into equal-frequency bins (quantiles).
+
+    Parameters
+    ----------
+    columns : Sequence[str] | None, default=None
+        Columns to discretize. If None, infers numeric columns.
+    n_bins : int, default=5
+        Number of bins.
+    drop_original : bool, default=True
+        Whether to drop original columns after discretization.
+    labels_as_int : bool, default=True
+        Whether to use integer labels (0, 1, 2, ...) instead of bin ranges.
+    suffix : str, default="__qbin"
+        Suffix for new binned columns.
+
+    Attributes
+    ----------
+    bins_ : Dict[str, List[float]]
+        Bin edges for each column.
+    feature_names_out_ : List[str]
+        Names of output columns.
+    """
+
     def __init__(
         self,
         columns: Optional[Sequence[str]] = None,
@@ -69,6 +99,9 @@ class EqualFrequencyDiscretizer(Transformer):
         cols = _infer_numeric_columns(df, self.columns)
         self.feature_names_in_ = cols
         self.bins_.clear()
+        self.feature_names_out_ = [f"{col}{self.suffix}" for col in cols]
+        if not self.drop_original:
+            self.feature_names_out_ = list(cols) + self.feature_names_out_
         qs = [i / self.n_bins for i in range(1, self.n_bins)]
         for col in cols:
             quantiles = _compute_quantiles(df, col, qs)
@@ -77,7 +110,7 @@ class EqualFrequencyDiscretizer(Transformer):
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> DataFrameOrLazy:
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
         out = df
@@ -91,6 +124,29 @@ class EqualFrequencyDiscretizer(Transformer):
 
 
 class EqualWidthDiscretizer(Transformer):
+    """Discretize numeric columns into equal-width bins.
+
+    Parameters
+    ----------
+    columns : Sequence[str] | None, default=None
+        Columns to discretize. If None, infers numeric columns.
+    n_bins : int, default=5
+        Number of bins.
+    drop_original : bool, default=True
+        Whether to drop original columns after discretization.
+    labels_as_int : bool, default=True
+        Whether to use integer labels (0, 1, 2, ...) instead of bin ranges.
+    suffix : str, default="__wbin"
+        Suffix for new binned columns.
+
+    Attributes
+    ----------
+    bins_ : Dict[str, List[float]]
+        Bin edges for each column.
+    feature_names_out_ : List[str]
+        Names of output columns.
+    """
+
     def __init__(
         self,
         columns: Optional[Sequence[str]] = None,
@@ -111,6 +167,9 @@ class EqualWidthDiscretizer(Transformer):
         cols = _infer_numeric_columns(df, self.columns)
         self.feature_names_in_ = cols
         self.bins_.clear()
+        self.feature_names_out_ = [f"{col}{self.suffix}" for col in cols]
+        if not self.drop_original:
+            self.feature_names_out_ = list(cols) + self.feature_names_out_
         for col in cols:
             s = df.get_column(col).cast(pl.Float64)
             mn = float(s.min())
@@ -126,7 +185,7 @@ class EqualWidthDiscretizer(Transformer):
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> DataFrameOrLazy:
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
         out = df
@@ -169,7 +228,7 @@ class ArbitraryDiscretizer(Transformer):
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> DataFrameOrLazy:
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
         out = df
@@ -253,7 +312,7 @@ class DecisionTreeDiscretizer(Transformer):
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> DataFrameOrLazy:
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
         out = df
@@ -311,7 +370,7 @@ class GeometricWidthDiscretizer(Transformer):
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> DataFrameOrLazy:
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
         out = df
@@ -359,7 +418,7 @@ class KMeansDiscretizer(Transformer):
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> DataFrameOrLazy:
         try:
             import numpy as np
         except Exception:
@@ -417,20 +476,26 @@ class MDLPDiscretizer(Transformer):
 
     def _best_split(self, x: list[float], y: list[int]) -> tuple[float | None, float, tuple[int, int, int, int]]:
         # x sorted with corresponding y
+        import itertools
         n = len(x)
-        # candidate thresholds at midpoints where class changes
+        if n < 2:
+            return None, -1.0, (0, 0, 0, 0)
+        
+        # Compute cumulative sums once for O(n) complexity
+        cum_pos = list(itertools.accumulate(y))
+        pos_total = cum_pos[-1]
+        neg_total = n - pos_total
+        H = self._entropy(pos_total, neg_total)
+        
         best_gain = -1.0
         best_thr: float | None = None
         best_counts = (0, 0, 0, 0)
-        # total counts
-        pos_total = sum(y)
-        neg_total = n - pos_total
-        H = self._entropy(pos_total, neg_total)
+        
         for i in range(1, n):
             if y[i] == y[i - 1]:
                 continue
             thr = (x[i] + x[i - 1]) / 2.0
-            pos_left = sum(y[:i])
+            pos_left = cum_pos[i - 1]
             neg_left = i - pos_left
             pos_right = pos_total - pos_left
             neg_right = neg_total - neg_left
@@ -506,7 +571,7 @@ class MDLPDiscretizer(Transformer):
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> DataFrameOrLazy:
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
         out = df
@@ -657,7 +722,7 @@ class ChiMergeDiscretizer(Transformer):
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> DataFrameOrLazy:
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
         out = df
@@ -775,7 +840,7 @@ class IsotonicBinningDiscretizer(Transformer):
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> DataFrameOrLazy:
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
         out = df
@@ -957,7 +1022,7 @@ class MonotonicOptimalBinningDiscretizer(Transformer):
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> DataFrameOrLazy:
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
         out = df

@@ -43,8 +43,29 @@ sklearn = ["scikit-learn>=1.1"]
 accelerated = ["numpy>=1.21", "rapidfuzz>=3.0"]
 dev = [
     "pytest>=8",
-    "polars>=0.19,<0.21",
+    "pytest-cov>=4",
+    "polars>=0.20",
+    "ruff>=0.4",
+    "mypy>=1.10",
+    "pre-commit>=3.7",
 ]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "TCH"]
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_ignores = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

@@ -4,13 +4,20 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import polars as pl
 
-from .base import Transformer, _ensure_polars_df
+from .base import (
+    Transformer,
+    _ensure_polars_df,
+    _ensure_eager,
+    _get_column_names,
+    _get_column_dtypes,
+    DataFrameOrLazy,
+)
 
 
-def _infer_numeric(df: pl.DataFrame, exclude: Sequence[str] = ()) -> List[str]:
+def _infer_numeric(df: DataFrameOrLazy, exclude: Sequence[str] = ()) -> List[str]:
     cols: List[str] = []
     ex = set(exclude)
-    for n, t in zip(df.columns, df.dtypes):
+    for n, t in zip(_get_column_names(df), _get_column_dtypes(df)):
         if n in ex:
             continue
         if t.is_numeric():
@@ -18,10 +25,10 @@ def _infer_numeric(df: pl.DataFrame, exclude: Sequence[str] = ()) -> List[str]:
     return cols
 
 
-def _infer_categorical(df: pl.DataFrame, exclude: Sequence[str] = ()) -> List[str]:
+def _infer_categorical(df: DataFrameOrLazy, exclude: Sequence[str] = ()) -> List[str]:
     cols: List[str] = []
     ex = set(exclude)
-    for n, t in zip(df.columns, df.dtypes):
+    for n, t in zip(_get_column_names(df), _get_column_dtypes(df)):
         if n in ex:
             continue
         if t == pl.String or t == pl.Categorical:
@@ -105,12 +112,12 @@ class SimpleImputer(Transformer):
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> DataFrameOrLazy:
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
         out = df
         for c, val in self.values_.items():
-            if self.add_indicator and c in df.columns:
+            if self.add_indicator and c in _get_column_names(df):
                 out = out.with_columns(pl.col(c).is_null().alias(f"{c}{self.indicator_suffix}"))
             new_c = c if self.drop_original else f"{c}{self.suffix}"
             out = out.with_columns(pl.col(c).fill_null(val).alias(new_c))
@@ -193,7 +200,7 @@ class GroupImputer(Transformer):
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> DataFrameOrLazy:
         if not self.is_fitted_ or self.group_stats_ is None:
             raise RuntimeError("Call fit before transform")
         out = df.join(self.group_stats_, on=self.groupby, how="left")
@@ -254,7 +261,7 @@ class KNNImputer(Transformer):
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> DataFrameOrLazy:
         if not self.is_fitted_ or self.imputer_ is None:
             raise RuntimeError("Call fit before transform")
         out = df
@@ -306,7 +313,7 @@ class IterativeImputer(Transformer):
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> DataFrameOrLazy:
         if not self.is_fitted_ or self.imputer_ is None:
             raise RuntimeError("Call fit before transform")
         out = df
@@ -357,7 +364,7 @@ class TimeSeriesImputer(Transformer):
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> DataFrameOrLazy:
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
         # preserve row order

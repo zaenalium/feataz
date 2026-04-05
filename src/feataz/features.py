@@ -1,16 +1,23 @@
 from __future__ import annotations
 
 import math
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import polars as pl
 
-from .base import Transformer, _ensure_polars_df
+from .base import (
+    Transformer,
+    _ensure_polars_df,
+    _ensure_eager,
+    _get_column_names,
+    _get_column_dtypes,
+    DataFrameOrLazy,
+)
 
 
-def _infer_numeric(df: pl.DataFrame, include_bool: bool = True) -> List[str]:
+def _infer_numeric(df: DataFrameOrLazy, include_bool: bool = True) -> List[str]:
     cols: List[str] = []
-    for n, t in zip(df.columns, df.dtypes):
+    for n, t in zip(_get_column_names(df), _get_column_dtypes(df)):
         if t.is_numeric():
             if not include_bool and t == pl.Boolean:
                 continue
@@ -18,9 +25,9 @@ def _infer_numeric(df: pl.DataFrame, include_bool: bool = True) -> List[str]:
     return cols
 
 
-def _infer_categorical(df: pl.DataFrame) -> List[str]:
+def _infer_categorical(df: DataFrameOrLazy) -> List[str]:
     cols: List[str] = []
-    for n, t in zip(df.columns, df.dtypes):
+    for n, t in zip(_get_column_names(df), _get_column_dtypes(df)):
         if t == pl.String or t == pl.Categorical:
             cols.append(n)
     return cols
@@ -61,14 +68,15 @@ class MathFeatures(Transformer):
     def fit(self, df: pl.DataFrame) -> "MathFeatures":
         df = _ensure_polars_df(df)
         self.numeric_cols_ = _infer_numeric(df) if self.columns is None else list(self.columns)
+        col_names = _get_column_names(df)
         for c in self.numeric_cols_:
-            if c not in df.columns:
+            if c not in col_names:
                 raise ValueError(f"Column '{c}' not found")
         self.feature_names_in_ = list(self.numeric_cols_)
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> DataFrameOrLazy:
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
         cols = self.numeric_cols_
@@ -109,7 +117,7 @@ class MathFeatures(Transformer):
             out = out.with_columns(exprs)
 
         if self.drop_original:
-            out = out.select([c for c in out.columns if c not in set(cols)])
+            out = out.select([c for c in _get_column_names(out) if c not in set(cols)])
         return out
 
 
@@ -141,18 +149,18 @@ class RelativeFeatures(Transformer):
 
     def fit(self, df: pl.DataFrame) -> "RelativeFeatures":
         df = _ensure_polars_df(df)
-        # infer numeric for missing sets
         num_cols = _infer_numeric(df)
         self.targets_ = num_cols if self.target_columns is None else list(self.target_columns)
         self.refs_ = num_cols if self.reference_columns is None else list(self.reference_columns)
+        col_names = _get_column_names(df)
         for c in self.targets_ + self.refs_:
-            if c not in df.columns:
+            if c not in col_names:
                 raise ValueError(f"Column '{c}' not found")
         self.feature_names_in_ = list(set(self.targets_ + self.refs_))
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> DataFrameOrLazy:
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
         eps = self.epsilon
@@ -175,7 +183,7 @@ class RelativeFeatures(Transformer):
         if exprs:
             out = out.with_columns(exprs)
         if self.drop_original:
-            out = out.select([c for c in out.columns if c not in set(self.feature_names_in_ or [])])
+            out = out.select([c for c in _get_column_names(out) if c not in set(self.feature_names_in_ or [])])
         return out
 
 
@@ -209,8 +217,9 @@ class CyclicalFeatures(Transformer):
 
     def fit(self, df: pl.DataFrame) -> "CyclicalFeatures":
         df = _ensure_polars_df(df)
+        col_names = _get_column_names(df)
         for c in self.columns:
-            if c not in df.columns:
+            if c not in col_names:
                 raise ValueError(f"Column '{c}' not found")
         if self.periods is not None:
             self.periods_ = {k: float(v) for k, v in self.periods.items()}
@@ -222,7 +231,7 @@ class CyclicalFeatures(Transformer):
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> DataFrameOrLazy:
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
         out = df
@@ -242,15 +251,19 @@ class DecisionTreeFeatures(Transformer):
     """Create features from Decision Tree predictions over one or more feature sets.
 
     Trains one tree per feature set and appends predictions (or probabilities) as new columns.
+    
+    Note: This transformer does NOT support LazyFrame as it requires sklearn model fitting.
     """
+
+    supports_lazy_: bool = False
 
     def __init__(
         self,
         target: str,
         columns: Optional[Sequence[str]] = None,
         feature_sets: Optional[Sequence[Sequence[str]]] = None,
-        problem: str = "auto",  # 'classification' | 'regression' | 'auto'
-        output: str = "auto",  # 'predict' | 'proba' | 'auto'
+        problem: str = "auto",
+        output: str = "auto",
         class_index: int = 1,
         max_depth: Optional[int] = None,
         min_samples_leaf: int = 1,
@@ -282,7 +295,6 @@ class DecisionTreeFeatures(Transformer):
         return [list(cols)] if cols else []
 
     def _encode_column(self, s: pl.Series, name: str) -> pl.Series:
-        # Ordinal-encode string-like columns for sklearn
         if s.dtype == pl.String or s.dtype == pl.Categorical:
             mapping = self.ordinal_maps_.get(name)
             if mapping is None:
@@ -295,17 +307,17 @@ class DecisionTreeFeatures(Transformer):
     def fit(self, df: pl.DataFrame) -> "DecisionTreeFeatures":
         try:
             from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
-        except Exception as e:  # pragma: no cover - optional dep
+        except Exception as e:
             raise ImportError(
                 "DecisionTreeFeatures requires scikit-learn. Install with `pip install scikit-learn`."
             ) from e
 
         df = _ensure_polars_df(df)
-        if self.target not in df.columns:
+        col_names = _get_column_names(df)
+        if self.target not in col_names:
             raise ValueError(f"target column '{self.target}' not found")
         y = df.get_column(self.target).to_numpy()
 
-        # Decide problem
         problem = self.problem
         if problem == "auto":
             n_unique = len(pl.Series(y).drop_nulls().unique())
@@ -321,7 +333,6 @@ class DecisionTreeFeatures(Transformer):
         self.trees_.clear()
         self.ordinal_maps_.clear()
         for fs in feature_sets:
-            # Build encoded matrix
             enc_df = pl.DataFrame({c: self._encode_column(df.get_column(c), c) for c in fs})
             X = enc_df.to_numpy()
             if problem == "classification":
@@ -344,15 +355,15 @@ class DecisionTreeFeatures(Transformer):
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> pl.DataFrame:
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
+        df = _ensure_eager(df)
         out = df
         for tree, fs, problem, output in self.trees_:
             enc_df = pl.DataFrame({c: self._encode_column(df.get_column(c), c) for c in fs})
             X = enc_df.to_numpy()
             out_name_base = self.set_sep.join(fs)
-            # Decide output
             use_output = output
             if use_output == "auto":
                 use_output = "proba" if problem == "classification" else "predict"
@@ -374,4 +385,3 @@ class DecisionTreeFeatures(Transformer):
             keep = [c for c in out.columns if c not in set(self.feature_names_in_ or [])]
             out = out.select(keep)
         return out
-

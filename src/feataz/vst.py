@@ -327,16 +327,12 @@ class BoxCoxTransformer(Transformer):
             lam = self.lambdas_[col]
             offset = self.offsets_[col]
             new_col = f"{col}{self.suffix}"
-            # Scalar implementation to reduce NumPy overhead per element
-            def _boxcox_scalar(v: float, lam=lam, off=offset) -> float:
-                x = float(v) + float(off)
-                if lam == 0:
-                    return float(np.log(x))
-                return float((np.power(x, lam) - 1.0) / lam)
-
-            out = out.with_columns(
-                pl.col(col).cast(pl.Float64).map_elements(_boxcox_scalar, return_dtype=pl.Float64).alias(new_col)
-            )
+            x = (pl.col(col).cast(pl.Float64) + offset)
+            if lam == 0:
+                expr = x.log()
+            else:
+                expr = (x.pow(lam) - 1.0) / lam
+            out = out.with_columns(expr.alias(new_col))
             if self.drop_original:
                 out = out.drop(col)
         return out
@@ -348,16 +344,16 @@ class BoxCoxTransformer(Transformer):
         for col in self.feature_names_in_ or []:
             lam = self.lambdas_[col]
             offset = self.offsets_[col]
-            new_col = col  # inverse to original name
-            def _inv_boxcox(v: float, lam=lam, off=offset) -> float:
-                if lam == 0:
-                    return float(np.exp(v) - off)
-                return float(np.power(lam * v + 1.0, 1.0 / lam) - off)
-            # assuming df contains transformed column name f"{col}{self.suffix}"
+            new_col = col
             tname = f"{col}{self.suffix}"
             if tname not in out.columns:
                 continue
-            out = out.with_columns(pl.col(tname).map_elements(_inv_boxcox, return_dtype=pl.Float64).alias(new_col))
+            y = pl.col(tname)
+            if lam == 0:
+                expr = y.exp() - offset
+            else:
+                expr = (lam * y + 1.0).pow(1.0 / lam) - offset
+            out = out.with_columns(expr.alias(new_col))
         return out
 
 
@@ -419,20 +415,20 @@ class YeoJohnsonTransformer(Transformer):
         for col in self.feature_names_in_ or []:
             lam = self.lambdas_[col]
             new_col = f"{col}{self.suffix}"
-            def _yj_scalar(v: float, lam=lam) -> float:
-                x = float(v)
-                if x >= 0:
-                    if lam == 0:
-                        return float(np.log1p(x))
-                    return float((np.power(x + 1.0, lam) - 1.0) / lam)
-                else:
-                    if lam == 2:
-                        return float(-np.log1p(-x))
-                    return float(-((np.power(1.0 - x, 2 - lam) - 1.0) / (2 - lam)))
-
-            out = out.with_columns(
-                pl.col(col).cast(pl.Float64).map_elements(_yj_scalar, return_dtype=pl.Float64).alias(new_col)
-            )
+            x = pl.col(col).cast(pl.Float64)
+            
+            if lam == 0:
+                expr = pl.when(x >= 0).then((x + 1).log()).otherwise(-(1 - x).log())
+            elif lam == 2:
+                expr = pl.when(x >= 0).then(((x + 1).pow(lam) - 1) / lam).otherwise(-((1 - x).pow(2 - lam) - 1) / (2 - lam))
+            else:
+                expr = pl.when(x >= 0).then(
+                    ((x + 1).pow(lam) - 1) / lam
+                ).otherwise(
+                    -((1 - x).pow(2 - lam) - 1) / (2 - lam)
+                )
+            
+            out = out.with_columns(expr.alias(new_col))
             if self.drop_original:
                 out = out.drop(col)
         return out
@@ -443,19 +439,21 @@ class YeoJohnsonTransformer(Transformer):
         out = df
         for col in self.feature_names_in_ or []:
             lam = self.lambdas_[col]
-            def _inv_yj(v: float, lam=lam) -> float:
-                if v is None:
-                    return np.nan
-                if lam == 0 and v >= 0:
-                    return float(np.expm1(v))
-                if lam == 2 and v < 0:
-                    return float(1 - np.expm1(-v))
-                if v >= 0:
-                    return float(np.power(lam * v + 1.0, 1.0 / lam) - 1.0)
-                else:
-                    return float(1.0 - np.power(1.0 - (2 - lam) * v, 1.0 / (2 - lam)))
             tname = f"{col}{self.suffix}"
             if tname not in out.columns:
                 continue
-            out = out.with_columns(pl.col(tname).map_elements(_inv_yj, return_dtype=pl.Float64).alias(col))
+            y = pl.col(tname)
+            
+            if lam == 0:
+                expr = pl.when(y >= 0).then(y.exp() - 1).otherwise(1 - (-y).exp())
+            elif lam == 2:
+                expr = pl.when(y >= 0).then((lam * y + 1).pow(1 / lam) - 1).otherwise(1 - (1 - (2 - lam) * y).pow(1 / (2 - lam)))
+            else:
+                expr = pl.when(y >= 0).then(
+                    (lam * y + 1).pow(1 / lam) - 1
+                ).otherwise(
+                    1 - (1 - (2 - lam) * y).pow(1 / (2 - lam))
+                )
+            
+            out = out.with_columns(expr.alias(col))
         return out

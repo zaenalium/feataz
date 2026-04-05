@@ -8,20 +8,49 @@ import numpy as np
 
 import polars as pl
 
-from .base import Transformer, _as_list, _ensure_polars_df
+from .base import (
+    Transformer,
+    _as_list,
+    _ensure_polars_df,
+    _ensure_eager,
+    _get_column_names,
+    _get_column_dtypes,
+    DataFrameOrLazy,
+)
 
 
-def _infer_categorical_columns(df: pl.DataFrame, columns: Optional[Sequence[str]]) -> List[str]:
+def _infer_categorical_columns(df: DataFrameOrLazy, columns: Optional[Sequence[str]]) -> List[str]:
     if columns is not None:
         return list(columns)
     cats: List[str] = []
-    for name, dtype in zip(df.columns, df.dtypes):
+    for name, dtype in zip(_get_column_names(df), _get_column_dtypes(df)):
         if dtype == pl.String or dtype == pl.Categorical:
             cats.append(name)
     return cats
 
 
 class OneHotEncoder(Transformer):
+    """One-hot encode categorical columns.
+
+    Parameters
+    ----------
+    columns : Sequence[str] | None, default=None
+        Columns to encode. If None, infers string/categorical columns.
+    drop_first : bool, default=False
+        Whether to drop the first category to avoid multicollinearity.
+    drop_original : bool, default=True
+        Whether to drop original columns after encoding.
+    prefix_sep : str, default="__"
+        Separator between column name and category in new column names.
+
+    Attributes
+    ----------
+    categories_ : Dict[str, List[str]]
+        Categories for each column.
+    feature_names_out_ : List[str]
+        Names of output columns.
+    """
+
     def __init__(
         self,
         columns: Optional[Sequence[str]] = None,
@@ -40,6 +69,7 @@ class OneHotEncoder(Transformer):
         cols = _infer_categorical_columns(df, self.columns)
         self.feature_names_in_ = cols
         self.categories_.clear()
+        self.feature_names_out_ = []
         for col in cols:
             cats = (
                 df.get_column(col)
@@ -52,13 +82,16 @@ class OneHotEncoder(Transformer):
             if self.drop_first and len(cats_sorted) > 0:
                 cats_sorted = cats_sorted[1:]
             self.categories_[col] = cats_sorted
+            for cat in cats_sorted:
+                self.feature_names_out_.append(f"{col}{self.prefix_sep}{cat}")
+        if not self.drop_original:
+            self.feature_names_out_ = list(cols) + self.feature_names_out_
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> DataFrameOrLazy:
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
-        df = _ensure_polars_df(df)
         out = df
         for col in self.feature_names_in_ or []:
             cats = self.categories_[col]
@@ -74,6 +107,29 @@ class OneHotEncoder(Transformer):
 
 
 class OrdinalEncoder(Transformer):
+    """Ordinal encode categorical columns.
+
+    Parameters
+    ----------
+    columns : Sequence[str] | None, default=None
+        Columns to encode. If None, infers string/categorical columns.
+    handle_unknown : str, default="use_encoded_value"
+        How to handle unknown categories. Options: "use_encoded_value", "ignore", "error".
+    unknown_value : int, default=-1
+        Value to use for unknown categories when handle_unknown="use_encoded_value".
+    drop_original : bool, default=True
+        Whether to drop original columns after encoding.
+    suffix : str, default="__ord"
+        Suffix for new encoded columns.
+
+    Attributes
+    ----------
+    mappings_ : Dict[str, Dict[str, int]]
+        Category to integer mappings for each column.
+    feature_names_out_ : List[str]
+        Names of output columns.
+    """
+
     def __init__(
         self,
         columns: Optional[Sequence[str]] = None,
@@ -94,6 +150,9 @@ class OrdinalEncoder(Transformer):
         cols = _infer_categorical_columns(df, self.columns)
         self.feature_names_in_ = cols
         self.mappings_.clear()
+        self.feature_names_out_ = [f"{col}{self.suffix}" for col in cols]
+        if not self.drop_original:
+            self.feature_names_out_ = list(cols) + self.feature_names_out_
         for col in cols:
             cats = (
                 df.get_column(col)
@@ -107,14 +166,15 @@ class OrdinalEncoder(Transformer):
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> DataFrameOrLazy:
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
-        df = _ensure_polars_df(df)
         out = df
         for col in self.feature_names_in_ or []:
             mapping = self.mappings_[col]
             map_df = pl.DataFrame({col: list(mapping.keys()), f"{col}{self.suffix}": list(mapping.values())})
+            if isinstance(df, pl.LazyFrame):
+                map_df = map_df.lazy()
             out = out.join(map_df, on=col, how="left")
             if self.handle_unknown == "use_encoded_value":
                 out = out.with_columns(
@@ -123,8 +183,12 @@ class OrdinalEncoder(Transformer):
             elif self.handle_unknown == "ignore":
                 pass
             else:
-                # error
-                if out.select(pl.col(f"{col}{self.suffix}").is_null().any()).item():
+                if isinstance(out, pl.LazyFrame):
+                    check_df = out.select(pl.col(f"{col}{self.suffix}").is_null().any()).collect()
+                    has_nulls = check_df.item()
+                else:
+                    has_nulls = out.select(pl.col(f"{col}{self.suffix}").is_null().any()).item()
+                if has_nulls:
                     raise ValueError(f"Unknown categories found in column {col}")
             if self.drop_original:
                 out = out.drop(col)
@@ -150,6 +214,9 @@ class CountFrequencyEncoder(Transformer):
         cols = _infer_categorical_columns(df, self.columns)
         self.feature_names_in_ = cols
         self.counts_.clear()
+        self.feature_names_out_ = [f"{col}{self.suffix}" for col in cols]
+        if not self.drop_original:
+            self.feature_names_out_ = list(cols) + self.feature_names_out_
         n = df.height
         for col in cols:
             cnt = df.group_by(col).len().rename({"len": f"{col}{self.suffix}"})
@@ -159,21 +226,46 @@ class CountFrequencyEncoder(Transformer):
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> DataFrameOrLazy:
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
         out = df
         for col in self.feature_names_in_ or []:
-            cnt = self.counts_[col]
-            out = out.join(cnt, on=col, how="left")
-            # unseen categories -> 0
-            out = out.with_columns(pl.col(f"{col}{self.suffix}").fill_null(0.0))
+            cnt_df = self.counts_[col]
+            if isinstance(df, pl.LazyFrame):
+                cnt_df = cnt_df.lazy()
+            out = out.join(cnt_df, on=col, how="left")
             if self.drop_original:
                 out = out.drop(col)
         return out
 
 
 class MeanEncoder(Transformer):
+    """Target-based mean encoder for categorical columns.
+
+    Parameters
+    ----------
+    target : str
+        Name of the target column.
+    columns : Sequence[str] | None, default=None
+        Columns to encode. If None, infers string/categorical columns.
+    smoothing : float, default=0.0
+        Smoothing parameter for blending with global mean.
+    drop_original : bool, default=True
+        Whether to drop original columns after encoding.
+    suffix : str, default="__mean"
+        Suffix for new encoded columns.
+
+    Attributes
+    ----------
+    global_mean_ : float
+        Global mean of target column.
+    encodings_ : Dict[str, pl.DataFrame]
+        Per-column encoding mappings.
+    feature_names_out_ : List[str]
+        Names of output columns.
+    """
+
     def __init__(
         self,
         target: str,
@@ -198,13 +290,16 @@ class MeanEncoder(Transformer):
         self.feature_names_in_ = cols
         self.global_mean_ = df.get_column(self.target).mean()
         self.encodings_.clear()
+        self.feature_names_out_ = [f"{col}{self.suffix}" for col in cols]
+        if not self.drop_original:
+            self.feature_names_out_ = list(cols) + self.feature_names_out_
         for col in cols:
             agg = df.group_by(col).agg([
                 pl.len().alias("cnt"),
                 pl.col(self.target).mean().alias("mean_t"),
             ])
             if self.smoothing > 0:
-                m = float(self.global_mean_)
+                m = float(self.global_mean_) if self.global_mean_ is not None else 0.0
                 agg = agg.with_columns(
                     (((pl.col("cnt") * pl.col("mean_t") + self.smoothing * m)) / (pl.col("cnt") + self.smoothing)).alias(
                         f"{col}{self.suffix}"
@@ -216,15 +311,19 @@ class MeanEncoder(Transformer):
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> DataFrameOrLazy:
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
         out = df
-        global_mean = float(self.global_mean_ if self.global_mean_ is not None else 0.0)
         for col in self.feature_names_in_ or []:
-            enc = self.encodings_[col]
-            out = out.join(enc, on=col, how="left")
-            out = out.with_columns(pl.col(f"{col}{self.suffix}").fill_null(global_mean))
+            enc_df = self.encodings_[col]
+            if isinstance(df, pl.LazyFrame):
+                enc_df = enc_df.lazy()
+            out = out.join(enc_df, on=col, how="left")
+            if self.global_mean_ is not None:
+                out = out.with_columns(
+                    pl.col(f"{col}{self.suffix}").fill_null(self.global_mean_)
+                )
             if self.drop_original:
                 out = out.drop(col)
         return out
@@ -371,19 +470,18 @@ class WeightOfEvidenceEncoder(Transformer):
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> DataFrameOrLazy:
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
         out = df
         for col in self.feature_names_in_ or []:
-            enc = self.encodings_[col]
-            out = out.join(enc, on=col, how="left")
-            # fill all new columns with smoothed fallback for unseen categories
-            new_cols = [c for c in enc.columns if c != col]
+            enc_df = self.encodings_[col]
+            if isinstance(df, pl.LazyFrame):
+                enc_df = enc_df.lazy()
+            out = out.join(enc_df, on=col, how="left")
             defaults = self.defaults_.get(col, {})
-            for nc in new_cols:
-                fill_value = defaults.get(nc, 0.0)
-                out = out.with_columns(pl.col(nc).fill_null(fill_value))
+            for encoded_col, default_val in defaults.items():
+                out = out.with_columns(pl.col(encoded_col).fill_null(default_val))
             if self.drop_original:
                 out = out.drop(col)
         return out
@@ -514,7 +612,7 @@ class DecisionTreeEncoder(Transformer):
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> DataFrameOrLazy:
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
         out = df
@@ -626,7 +724,7 @@ class RareLabelEncoder(Transformer):
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> DataFrameOrLazy:
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
         out = df
@@ -684,7 +782,7 @@ class StringSimilarityEncoder(Transformer):
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> DataFrameOrLazy:
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
         out = df
@@ -747,7 +845,7 @@ class HashEncoder(Transformer):
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> DataFrameOrLazy:
         import hashlib
 
         if not self.is_fitted_:
@@ -795,7 +893,7 @@ class BinaryEncoder(Transformer):
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> DataFrameOrLazy:
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
         out = df
@@ -821,6 +919,35 @@ class BinaryEncoder(Transformer):
 
 
 class LeaveOneOutEncoder(Transformer):
+    """Leave-one-out target encoder for categorical columns.
+    
+    Computes the mean of the target for each category, excluding the current row.
+    This prevents data leakage during training. For inference (when target is not
+    available), falls back to simple mean encoding.
+    
+    Parameters
+    ----------
+    target : str
+        Name of the target column.
+    columns : Sequence[str] | None, default=None
+        Columns to encode. If None, infers string/categorical columns.
+    smoothing : float, default=0.0
+        Smoothing parameter for blending with global mean.
+    drop_original : bool, default=True
+        Whether to drop original columns after encoding.
+    suffix : str, default="__loo"
+        Suffix for new encoded columns.
+    
+    Attributes
+    ----------
+    stats_ : Dict[str, pl.DataFrame]
+        Per-column statistics (count and sum of target).
+    global_mean_ : float
+        Global mean of target column.
+    feature_names_out_ : List[str]
+        Names of output columns.
+    """
+    
     def __init__(
         self,
         target: str,
@@ -851,26 +978,55 @@ class LeaveOneOutEncoder(Transformer):
                 pl.col(self.target).sum().alias("sum_t"),
             ])
             self.stats_[col] = agg
+        self.feature_names_out_ = [f"{col}{self.suffix}" for col in cols]
+        if not self.drop_original:
+            self.feature_names_out_ = list(cols) + self.feature_names_out_
         self.is_fitted_ = True
         return self
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+    def transform(self, df: DataFrameOrLazy) -> DataFrameOrLazy:
         if not self.is_fitted_:
             raise RuntimeError("Call fit before transform")
         out = df
         global_mean = float(self.global_mean_ if self.global_mean_ is not None else 0.0)
+        has_target = self.target in df.columns
+        
         for col in self.feature_names_in_ or []:
             stats = self.stats_[col]
             out = out.join(stats, on=col, how="left")
-            # (sum - y) / (cnt - 1) with smoothing
-            enc = ((pl.col("sum_t") - pl.col(self.target)) / (pl.col("cnt") - 1)).alias("_tmp_loo")
-            if self.smoothing > 0:
-                m = global_mean
-                enc = (((pl.col("cnt") - 1) * enc + self.smoothing * m) / ((pl.col("cnt") - 1) + self.smoothing)).alias("_tmp_loo")
-            out = out.with_columns(enc)
             new_col = f"{col}{self.suffix}"
-            out = out.with_columns(pl.when(pl.col("cnt") > 1).then(pl.col("_tmp_loo")).otherwise(global_mean).alias(new_col))
-            out = out.drop(["cnt", "sum_t", "_tmp_loo"])
+            
+            if has_target:
+                enc = ((pl.col("sum_t") - pl.col(self.target)) / (pl.col("cnt") - 1)).alias("_tmp_loo")
+                if self.smoothing > 0:
+                    m = global_mean
+                    enc = (((pl.col("cnt") - 1) * enc + self.smoothing * m) / ((pl.col("cnt") - 1) + self.smoothing)).alias("_tmp_loo")
+                out = out.with_columns(enc)
+                out = out.with_columns(
+                    pl.when(pl.col("cnt") > 1)
+                    .then(pl.col("_tmp_loo"))
+                    .otherwise(global_mean)
+                    .alias(new_col)
+                )
+                out = out.drop("_tmp_loo")
+            else:
+                mean_enc = (pl.col("sum_t") / pl.col("cnt")).alias("_tmp_mean")
+                if self.smoothing > 0:
+                    m = global_mean
+                    mean_enc = (
+                        (pl.col("cnt") * mean_enc + self.smoothing * m) / 
+                        (pl.col("cnt") + self.smoothing)
+                    ).alias("_tmp_mean")
+                out = out.with_columns(mean_enc)
+                out = out.with_columns(
+                    pl.when(pl.col("cnt") > 0)
+                    .then(pl.col("_tmp_mean"))
+                    .otherwise(global_mean)
+                    .alias(new_col)
+                )
+                out = out.drop("_tmp_mean")
+            
+            out = out.drop(["cnt", "sum_t"])
             if self.drop_original:
                 out = out.drop(col)
         return out

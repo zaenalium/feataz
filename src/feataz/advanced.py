@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from typing import Callable, List, Optional, Sequence
 
 import numpy as np
 import polars as pl
 
 from .base import Transformer, _ensure_polars_df
+
+logger = logging.getLogger(__name__)
 
 
 class CrossFitTransformer(Transformer):
@@ -40,6 +43,7 @@ class CrossFitTransformer(Transformer):
         self.fold_models_: List[Transformer] = []
         self.full_model_: Optional[Transformer] = None
         self.oof_columns_: List[str] = []
+        self.oof_train_: Optional[pl.DataFrame] = None
 
     def _make_folds(self, df: pl.DataFrame) -> List[pl.Series]:
         n = df.height
@@ -72,6 +76,8 @@ class CrossFitTransformer(Transformer):
 
     def fit(self, df: pl.DataFrame) -> "CrossFitTransformer":
         df = _ensure_polars_df(df)
+        if df.is_empty():
+            logger.warning("Fitting CrossFitTransformer on empty DataFrame")
         masks = self._make_folds(df)
         oof = df
         self.fold_models_.clear()
@@ -80,38 +86,33 @@ class CrossFitTransformer(Transformer):
         for k, m in enumerate(masks):
             train = df.filter(~m)
             valid = df.filter(m)
+            if train.is_empty() or valid.is_empty():
+                logger.warning(f"Fold {k} has empty train or validation set")
             model = self.factory()
             model.fit(train)
             self.fold_models_.append(model)
             enc_valid = model.transform(valid)
-            # determine new columns by diff
             new_cols = [c for c in enc_valid.columns if c not in valid.columns]
             if not new_cols:
                 raise ValueError("Base transformer did not produce new columns")
             oof_cols_added = new_cols
-            # attach fold predictions back in order
             enc_valid = enc_valid.with_row_index("__row__")
             valid = valid.with_row_index("__row__")
             merged = valid.select(["__row__"]).join(enc_valid.select(["__row__"] + new_cols), on="__row__", how="left").drop("__row__")
-            # Fill into oof for rows of this fold
             oof = oof.with_row_index("__row__")
             oof = oof.join(merged.with_row_index("__row__"), on="__row__", how="left", suffix=f"__f{k}")
             oof = oof.drop("__row__")
-        # consolidate oof columns (if duplicates from multiple folds due to suffix)
-        # Use first non-null across fold columns for each feature
         for base in oof_cols_added:
             fold_cols = [c for c in oof.columns if c == base or c.startswith(base + "__f")]
             if len(fold_cols) > 1:
                 oof = oof.with_columns(pl.coalesce([pl.col(c) for c in fold_cols]).alias(base))
-                # drop suffixed ones
                 drop_cols = [c for c in fold_cols if c != base]
                 oof = oof.drop(drop_cols)
         self.oof_columns_ = oof_cols_added
-        # fit full model for transform on new data
         self.full_model_ = self.factory().fit(df)
         self.feature_names_in_ = list(df.columns)
         self.is_fitted_ = True
-        self._oof_train_ = oof  # store OOF for reference
+        self.oof_train_ = oof
         return self
 
     def transform(self, df: pl.DataFrame) -> pl.DataFrame:
