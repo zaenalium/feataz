@@ -26,7 +26,36 @@ Key ideas demonstrated inside the script:
 Invoke the script after local changes to make sure you did not break the public API, or keep it as a
 template when wiring the transformers into a larger Polars pipeline.
 
-## Notebook case study
+## LazyFrame Example
+
+For large datasets, use LazyFrame to enable query optimization and reduce memory usage:
+
+```python
+import polars as pl
+from feataz import OneHotEncoder, MathFeatures, RobustScaler
+
+lazy_df = pl.DataFrame({
+    "category": ["a", "b", "a", "c"] * 100000,
+    "value": [1.0, 2.5, 0.5, 3.2] * 100000,
+}).lazy()
+
+result = (
+    OneHotEncoder(["category"])
+    .fit_transform(lazy_df)
+)
+result = MathFeatures(columns=["value"], unary_ops=["log", "sqrt"]).fit_transform(result)
+result = RobustScaler(columns=["value__log", "value__sqrt"]).fit_transform(result)
+
+final_df = result.collect()
+```
+
+**When to use LazyFrame:**
+
+- Large datasets that don't fit in memory
+- Chaining multiple transformations (query optimizer combines operations)
+- Reading from files with `pl.scan_csv()` or `pl.scan_parquet()`
+
+**Note:** `fit()` always executes eagerly to learn parameters. Only `transform()` remains lazy.
 
 The `notebook/feature_engineering_on_titanic_data.ipynb` notebook (and its Jupytext version in
 `notebook/tutorials/tutorial_01_titanic_survival.py`) walks through a complete binary

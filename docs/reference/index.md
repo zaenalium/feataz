@@ -2,7 +2,35 @@
 
 Each transformer in `feataz` inherits from the lightweight `Transformer` base class defined in
 `src/feataz/base.py`. The base takes care of handling Polars vs. pandas inputs, exposes
-`fit_transform`, and provides serialization helpers through `to_dict` / `from_dict`.
+`fit_transform`, and provides serialization helpers through `to_dict` / `from_dict`. Most
+transformers also support LazyFrame input, preserving the lazy evaluation model.
+
+## LazyFrame Compatibility
+
+Transformers that support LazyFrame preserve the input type: `transform(lazy_df)` returns a
+LazyFrame. Note that `fit()` is always eager (collects internally to learn parameters).
+
+**Fully lazy (transform returns LazyFrame):**
+
+| Module | Transformers |
+| --- | --- |
+| `features` | MathFeatures, RelativeFeatures, CyclicalFeatures |
+| `encoders` | OneHotEncoder, BinaryEncoder, HashEncoder, OrdinalEncoder, CountFrequencyEncoder, MeanEncoder, WeightOfEvidenceEncoder, LeaveOneOutEncoder |
+| `discretize` | EqualFrequencyDiscretizer, EqualWidthDiscretizer, ArbitraryDiscretizer, GeometricWidthDiscretizer |
+| `impute` | SimpleImputer, GroupImputer, TimeSeriesImputer |
+| `scale` | RobustScaler, QuantileRankTransformer |
+| `vst` | LogTransformer, LogCPTransformer, ReciprocalTransformer, ArcsinTransformer, PowerTransformer, BoxCoxTransformer, YeoJohnsonTransformer |
+| `outliers` | ClipOutliers |
+
+**Eager-only (require DataFrame, use sklearn/Python loops):**
+
+| Module | Transformers |
+| --- | --- |
+| `encoders` | DecisionTreeEncoder, StringSimilarityEncoder |
+| `discretize` | DecisionTreeDiscretizer, KMeansDiscretizer, MDLPDiscretizer, ChiMergeDiscretizer, IsotonicBinningDiscretizer, MonotonicOptimalBinningDiscretizer |
+| `impute` | KNNImputer, IterativeImputer |
+| `outliers` | IsolationForestOutlierHandler |
+| `advanced` | CrossFitTransformer |
 
 Use this catalog to find the module, summary, and the most important constructor arguments for
 every public class exported from `feataz.__init__`.

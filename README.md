@@ -1,8 +1,8 @@
 feataz — Feature engineering on Polars
 ======================================
 
-Lightweight feature engineering utilities on top of Polars DataFrames. Provides
-categorical encoders, numerical discretizers, variance-stabilizing transforms,
+Lightweight feature engineering utilities on top of Polars DataFrames and LazyFrames.
+Provides categorical encoders, numerical discretizers, variance-stabilizing transforms,
 and simple feature interactions with a consistent fit/transform API.
 
 Install

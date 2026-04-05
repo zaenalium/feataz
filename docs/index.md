@@ -12,8 +12,8 @@ analytics work.
 - **Broad coverage** – categorical encoders, discretizers, scaling, variance-stabilizing
   transforms, interaction builders, snapshot aggregations, imputers, outlier guards, diagnostics,
   and even an automated featurizer live in `src/feataz`.
-- **Polars-first** – by default everything works on `polars.DataFrame` objects, but key entry
-  points accept pandas objects and convert them internally.
+- **Polars-first** – works on both `polars.DataFrame` and `polars.LazyFrame` objects. LazyFrame
+  support enables query optimization and memory-efficient pipelines for large datasets.
 - **Incremental adoption** – string similarity, decision-tree helpers, advanced discretizers,
   and scikit-learn based utilities are optional extras; you can install only what you need.
 

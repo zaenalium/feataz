@@ -85,6 +85,34 @@ print(result)
 Every transformer stores its learned state in attributes ending with `_`. Use `get_feature_names_out`
 to inspect generated column names and `to_dict()` / `from_dict()` for lightweight persistence.
 
+## LazyFrame Support
+
+Most transformers support LazyFrame input, preserving the lazy evaluation model for large datasets:
+
+```python
+import polars as pl
+from feataz import OneHotEncoder, MathFeatures
+
+lazy_df = pl.DataFrame({
+    "category": ["a", "b", "a", "c"] * 100000,
+    "value": [1.0, 2.5, 0.5, 3.2] * 100000,
+}).lazy()
+
+result = (
+    OneHotEncoder(["category"])
+    .fit_transform(lazy_df)
+)
+result = MathFeatures(columns=["value"], unary_ops=["log", "sqrt"]).fit_transform(result)
+
+final_df = result.collect()
+```
+
+**Key points:**
+
+- `fit()` is always eager (collects LazyFrame internally to learn parameters)
+- `transform()` preserves input type: LazyFrame in → LazyFrame out
+- Use `.lazy()` to start the pipeline and `.collect()` at the end
+
 ## Suggested workflows
 
 - Start with [`suggest_methods`](reference/index.md#autofeaturizer-and-suggestions) to obtain a
